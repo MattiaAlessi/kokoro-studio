@@ -136,6 +136,11 @@ _EXT_TO_FORMAT: Dict[str, str] = {
 # slider can dial it without hunting for magic numbers.
 MP3_BITRATE_KBPS = 192
 
+# Cross-segment silence inserted by `generate_speech` between
+# multi-speaker segments. 0.25 s sounds natural without dragging on a
+# long dialogue script; set `speaker_gap_s=0.0` to disable.
+_DIALOGUE_DEFAULT_GAP_S = 0.25
+
 
 # ---------------------------------------------------------------------------
 # Pipeline cache (KPipeline is heavy to load, reuse it)
@@ -309,16 +314,20 @@ def generate_speech(
     output_path: Optional[str] = None,
     speed: float = 1.0,
     split_pattern: Optional[str] = None,
-    on_chunk: Optional["Callable[[int, np.ndarray], None]"] = None,
+    on_chunk: Optional["Callable[[int, int, np.ndarray], None]"] = None,
     stop_check: Optional["Callable[[], bool]"] = None,
     output_format: Optional[str] = None,
     pronunciation_rules: Optional[Dict[str, str]] = None,
+    multi_speaker: bool = False,
+    speaker_gap_s: float = _DIALOGUE_DEFAULT_GAP_S,
 ) -> np.ndarray:
     """Synthesize `text` with Kokoro and return the audio (float32) at 24 kHz.
 
     Args:
         text:          text to synthesize (non-empty).
         voice:         voice name (default: 'af_heart'). See VOICES or list_voices().
+                       In multi-speaker mode this is used as the default voice
+                       for unmarked lines and as fallback for unknown markers.
         lang_code:     if None, derived from the voice; if specified, must be
                        consistent with the voice (otherwise ValueError).
         output_path:   if specified, save the audio. Format is decided by
@@ -332,9 +341,16 @@ def generate_speech(
         speed:         number in (SPEED_MIN, SPEED_MAX]. 1.0 = normal.
         split_pattern: optional regex to split long text (e.g. r'\\n+').
         on_chunk:      optional callback invoked after every Kokoro chunk with
-                       args (chunk_index, audio_chunk_ndarray). The chunk's
-                       dtype is float32, mono, at SAMPLE_RATE Hz. Exceptions
-                       raised by the callback are logged to stderr and ignored.
+                       args (segment_index, chunk_index, audio_chunk_ndarray).
+                       In single-speaker mode `segment_index` is always 0. In
+                       multi-speaker mode it indicates which voice segment
+                       produced the chunk (0-based). For the cross-segment
+                       silence gap a sentinel `segment_index` is paired with
+                       `chunk_index = kokoro_studio.dialogue.CHUNK_IDX_GAP`
+                       so consumers that care can distinguish synthetic
+                       silence from real audio. The chunk's dtype is
+                       float32, mono, at SAMPLE_RATE Hz. Exceptions raised
+                       by the callback are logged to stderr and ignored.
         stop_check:    optional callable returning True to request cancellation.
                        Checked after each chunk; if it returns True a
                        RuntimeError("Synthesis cancelled by caller.") is raised
@@ -345,12 +361,27 @@ def generate_speech(
                        call-site behaviour (no format argument → WAV) is
                        fully preserved for compatibility.
         pronunciation_rules: optional `{find: replace}` map applied to the
-                       input `text` BEFORE synthesis (whole-word, case-
-                       sensitive, longest-rule-first). Empty / None is a
-                       no-op fast path. Lazily imports the `pronunciation`
-                       module so users who only ever synthesise without a
-                       dict don't need to install anything beyond the
-                       engine's baseline deps.
+                       input `text` (or each segment, in multi-speaker mode)
+                       BEFORE synthesis (whole-word, case-sensitive,
+                       longest-rule-first). Empty / None is a no-op fast
+                       path. Lazily imports the `pronunciation` module so
+                       users who only ever synthesise without a dict don't
+                       need to install anything beyond the engine's
+                       baseline deps.
+        multi_speaker: if True, parse `[voice_name]: text` markers in `text`
+                       (one marker per line, at the start) and synthesise
+                       each segment independently. Insert `speaker_gap_s`
+                       seconds of silence between segments. Unknown voice
+                       tokens fall back to `voice`; warnings are echoed to
+                       stderr but synthesis continues so a partial typo
+                       doesn't abort the whole script.
+        speaker_gap_s: cross-segment silence in multi-speaker mode, in
+                       seconds. Set to 0.0 for instant joins. Default is
+                       `_DIALOGUE_DEFAULT_GAP_S` (0.25 s — short enough
+                       to not feel sluggish, long enough to avoid harsh
+                       jump-cuts between voices). Each gap is also fed
+                       through `on_chunk` as synthetic silence so the
+                       real-time streaming path plays it through.
 
     Returns:
         numpy.ndarray float32 mono at 24 kHz.
@@ -397,6 +428,36 @@ def generate_speech(
               f"{len(pronunciation_rules)} rule(s))",
               file=sys.stderr)
 
+    # ---- Multi-speaker dispatch -----------------------------------
+    # Each segment calls Kokoro separately (Kokoro bakes voice style into
+    # the forward pass so voice swaps aren't possible mid-call). The
+    # engine handles parsing + per-segment pronunciation rules + the
+    # inter-segment silence gap, so the GUI gets a single entry point.
+    if multi_speaker:
+        from kokoro_studio.dialogue import parse_dialogue  # lazy: no Kokoro dep
+        segs, warnings = parse_dialogue(
+            text,
+            default_voice=voice,
+            known_voices=set(VOICES.keys()),
+        )
+        for w in warnings:
+            print(f"[Kokoro] Dialogue warning: {w}", file=sys.stderr)
+        if not segs:
+            raise ValueError(
+                "Dialogue mode found no synthesizable segments in the "
+                "editor text (all lines were empty after marker stripping)."
+            )
+        return _generate_dialogue_segments(
+            segments=segs,
+            speed=speed,
+            output_path=output_path,
+            output_format=output_format,
+            on_chunk=on_chunk,
+            stop_check=stop_check,
+            pronunciation_rules=pronunciation_rules,
+            speaker_gap_s=speaker_gap_s,
+        )
+
     pipeline = _get_pipeline(lang_code)
 
     print(f"[Kokoro] Synthesis: voice={voice}, lang={lang_code}, "
@@ -414,7 +475,7 @@ def generate_speech(
               file=sys.stderr)
         if on_chunk is not None:
             try:
-                on_chunk(i, a)
+                on_chunk(0, i, a)
             except Exception as cb_err:
                 print(f"  ! on_chunk callback raised: {cb_err}", file=sys.stderr)
         if stop_check is not None and stop_check():
@@ -439,6 +500,135 @@ def generate_speech(
               f"({elapsed:.2f}s of generation, "
               f"{len(full_audio)/SAMPLE_RATE:.2f}s of audio)",
               file=sys.stderr)
+
+    return full_audio
+
+
+def _generate_dialogue_segments(
+    segments: List["DialogueSegment"],
+    speed: float,
+    output_path: Optional[str],
+    output_format: Optional[str],
+    on_chunk: "Callable[[int, int, np.ndarray], None]",
+    stop_check: "Callable[[], bool]",
+    pronunciation_rules: Optional[Dict[str, str]],
+    speaker_gap_s: float,
+) -> np.ndarray:
+    """Per-segment synthesis path used when `multi_speaker=True`.
+
+    Each segment is synthesised by its own `KPipeline(...)` call because
+    Kokoro bakes the voice style vector into the forward pass — voice
+    switches inside one call are impossible. Between segments we emit
+    `speaker_gap_s` seconds of silence through the same `on_chunk`
+    callback so a real-time streaming consumer plays a natural pause.
+
+    Per-segment contract:
+      * Pronunciation rules are applied independently to each segment's
+        text (rules are whole-word, deterministic, and don't cross
+        segment boundaries anyway — but matching engine_情的)
+      * The on_chunk callback receives `(seg_idx, chunk_idx, audio)`
+        where `seg_idx` is 0-based segment index. The cross-segment
+        silence is emitted with `chunk_idx = dialogue.CHUNK_IDX_GAP`
+        so consumers can distinguish it from real audio if needed.
+    """
+    from kokoro_studio.dialogue import DialogueSegment, CHUNK_IDX_GAP  # noqa: F401
+
+    all_audio: List[np.ndarray] = []
+    start = time.time()
+    # Convert gap seconds → int samples once up front.
+    gap_samples = int(round(SAMPLE_RATE * max(0.0, float(speaker_gap_s))))
+
+    for seg_idx, seg in enumerate(segments):
+        # Per-segment pronunciation rewrite. `apply_substitutions`
+        # short-circuits on empty rules; we still gate the call
+        # here because the lazy import is cheap and avoids an
+        # import on every segment.
+        seg_text = seg.text
+        if pronunciation_rules:
+            from kokoro_studio.pronunciation import apply_substitutions
+            seg_text = apply_substitutions(seg_text, pronunciation_rules)
+
+        # Resolve the right pipeline for this segment's voice.
+        if seg.voice not in VOICES:
+            # The parser normally catches unknown voices, but if a
+            # caller bypassed parse_dialogue and passed an arbitrary
+            # segment list we still want to fail cleanly here.
+            raise ValueError(
+                f"Dialogue segment #${seg_idx} references unknown "
+                f"voice '{seg.voice}'. Known: {sorted(VOICES)}"
+            )
+        seg_lang = VOICES[seg.voice][0]
+        seg_pipeline = _get_pipeline(seg_lang)
+
+        print(
+            f"[Kokoro] Dialogue segment {seg_idx + 1}/{len(segments)}"
+            f": voice={seg.voice}, lang={seg_lang}, "
+            f"len(text)={len(seg_text)}",
+            file=sys.stderr,
+        )
+
+        seg_audio_parts: List[np.ndarray] = []
+        for chunk_idx, (_g, _p, audio) in enumerate(
+            seg_pipeline(seg_text, voice=seg.voice, speed=speed)
+        ):
+            a = np.asarray(audio, dtype=np.float32)
+            seg_audio_parts.append(a)
+            print(
+                f"  - seg {seg_idx + 1} chunk {chunk_idx}: "
+                f"{len(a)} samples ({len(a)/SAMPLE_RATE:.2f}s)",
+                file=sys.stderr,
+            )
+            if on_chunk is not None:
+                try:
+                    on_chunk(seg_idx, chunk_idx, a)
+                except Exception as cb_err:
+                    print(
+                        f"  ! on_chunk callback raised (seg {seg_idx}): "
+                        f"{cb_err}",
+                        file=sys.stderr,
+                    )
+            if stop_check is not None and stop_check():
+                raise RuntimeError("Synthesis cancelled by caller.")
+
+        if seg_audio_parts:
+            all_audio.append(np.concatenate(seg_audio_parts))
+
+        # Cross-segment silence gap (skip after the last segment so we
+        # don't pad the file with a trailing pause).
+        if gap_samples > 0 and seg_idx < len(segments) - 1:
+            gap = np.zeros(gap_samples, dtype=np.float32)
+            all_audio.append(gap)
+            if on_chunk is not None:
+                try:
+                    on_chunk(seg_idx, CHUNK_IDX_GAP, gap)
+                except Exception as cb_err:
+                    print(
+                        f"  ! on_chunk callback raised (gap): {cb_err}",
+                        file=sys.stderr,
+                    )
+
+    if not all_audio:
+        raise RuntimeError(
+            "Kokoro produced no audio for any dialogue segment."
+        )
+
+    full_audio = np.concatenate(all_audio)
+    elapsed = time.time() - start
+
+    if output_path:
+        effective_format = (
+            output_format.lower()
+            if output_format is not None
+            else _infer_format_from_path(output_path)
+        )
+        save_audio(full_audio, output_path, output_format=output_format)
+        print(
+            f"[Kokoro] Saved {output_path}  ({effective_format.upper()}) "
+            f"({elapsed:.2f}s of generation, "
+            f"{len(full_audio)/SAMPLE_RATE:.2f}s of audio, "
+            f"{len(segments)} segments)",
+            file=sys.stderr,
+        )
 
     return full_audio
 

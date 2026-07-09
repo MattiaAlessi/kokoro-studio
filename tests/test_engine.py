@@ -94,13 +94,25 @@ def test_get_voice_info_unknown_raises(engine):
 # ---------------------------------------------------------------------------
 
 def test_generate_speech_signature_preserves_positional_compat(engine):
-    """All historical positional args must remain positional-or-keyword."""
+    """All historical positional args must remain in their original positions.
+
+    New params (multi_speaker, speaker_gap_s for Phase 2 Multi-Speaker
+    Dialogue Mode) are appended AFTER pronunciation_rules and don't
+    shift any existing positional index — calling code that uses the
+    original 10 positional args keeps working unchanged.
+    """
     params = list(inspect.signature(engine.generate_speech).parameters)
-    # Critical: pronunciation_rules is the LAST parameter, after output_format.
-    # This preserves positional backwards compat for any external caller
-    # that may have used positional args.
-    assert params[-1] == "pronunciation_rules", f"last param: {params[-1]}"
-    assert params[-2] == "output_format", f"second-to-last: {params[-2]}"
+    expected_historical = [
+        "text", "voice", "lang_code", "output_path", "speed",
+        "split_pattern", "on_chunk", "stop_check", "output_format",
+        "pronunciation_rules",
+    ]
+    assert params[:len(expected_historical)] == expected_historical
+    # New phase-2 additions (last in the signature).
+    assert "multi_speaker" in params, "multi_speaker kwarg missing"
+    assert "speaker_gap_s" in params, "speaker_gap_s kwarg missing"
+    assert params[params.index("multi_speaker")] == "multi_speaker"
+    assert params.index("multi_speaker") > params.index("pronunciation_rules")
 
 
 def test_generate_speech_rejects_empty_text(engine):

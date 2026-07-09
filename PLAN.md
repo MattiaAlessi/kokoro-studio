@@ -187,13 +187,24 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
     naturally into IdleState after EOS
   - _Complexity: Medium-High_
 
-- [ ] **Multi-Speaker Dialogue Mode**
-  - Parse `[voice_name]: text` syntax in the editor
-  - Switch Kokoro pipeline voice dynamically per block
-  - Concatenate results into a single output file
-  - Essential for audiobooks, podcasts, game dialogue
-  - Example: `[af_heart]: Hello! \n [am_adam]: Hi there!`
-  - _Complexity: Medium_
+- [x] **Multi-Speaker Dialogue Mode** 🎭 ✅ *shipped*
+  - Parse `[voice_name]:` syntax (one marker per line, line-start only)
+  - Auto-detect in editor: any marker triggers the dialogue engine path via
+    inline `🎭 N speakers · summary` chip + `?` help button (syntax modal)
+  - Each `KPipeline` call gets its own voice (Kokoro bakes the style vector
+    into the forward pass — voice swaps mid-call are NOT possible in v0.9);
+    audio concatenated with configurable cross-segment silence default 0.25 s
+  - Per-segment streaming: chunks flow through the existing ring buffer in
+    order; silence gap emitted as a synthetic chunk with `chunk_idx = -1`
+    so the real-time playback plays a natural pause
+  - Pronunciation dictionary applied per-segment in the multi-speaker path
+  - 26 new tests in `tests/test_dialogue.py` cover parser semantics, line
+    continuation, unknown-voice fallback, CRLF, whitespace, edge cases
+  - Empty-markers-only scripts surface a friendly QMessageBox instead of
+    routing a doomed job to the engine
+  - SynthesisWorker uses a cumulative chunk counter so the status bar
+    resets only at the start of a fresh job, not at every speaker change
+  _Complexity: Medium_
 
 - [ ] **Voice Blending / Mixing**
   - Slider to blend two voices (e.g. 70% `af_bella` + 30% `af_sarah`)
@@ -222,7 +233,16 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
   > — because `b''` is the EOF signal and would prematurely end
   > playback. Only return `b''` once `eos=True`.
 - [ ] Research StyleTTS 2 style vector access from the `kokoro` Python library — can we get/set style tensors?
-- [ ] Research `kokoro` pipeline internals — how to swap voices mid-generation for multi-speaker
+- [x] Research `kokoro` pipeline internals — how to swap voices mid-generation for multi-speaker
+  > **Answer:** Not possible. Kokoro-82M bakes the voice style vector into
+  > the model's forward pass, so a single `KPipeline(...)` call can only
+  > produce audio in ONE voice. To get multi-speaker audio we segment the
+  > script at the orchestrator level (one `pipeline(text, voice=X)` call
+  > per segment) and concatenate the resulting audio arrays. Implemented
+  > in `kokoro_studio.engine._generate_dialogue_segments`. Cross-segment
+  > silence is fed through the same `on_chunk` callback as a synthetic
+  > chunk with `chunk_idx = dialogue.CHUNK_IDX_GAP` so the streaming
+  > ring buffer plays the natural pause.
 - [ ] Research SSML tag parsing libraries (e.g. `ssml-parser` or custom regex)
 - [ ] Investigate whether Kokoro's `KPipeline` exposes phoneme-level timing for better streaming sync
 
@@ -438,13 +458,13 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 ## Current Status
 
-**Overall Progress:** 6 / 20 features completed
+**Overall Progress:** 7 / 20 features completed
 
 **Current Phase:** Phase 2 — Core TTS Advancements *(in progress)*
 
-**Just Shipped:** Real-Time Streaming Playback 🔥
+**Just Shipped:** Multi-Speaker Dialogue Mode 🎭
 
-**Next Up:** Multi-Speaker Dialogue Mode
+**Next Up:** Voice Blending / Mixing
 
 ---
 

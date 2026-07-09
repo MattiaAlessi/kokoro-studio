@@ -1,0 +1,49 @@
+Joined length: 322
+Joined found at: -1
+
+--- line 0 ---
+  Pattern: 'self._editor.setPlaceholderText('
+  Pattern length: 32
+  Found at: 53213
+  Pattern codepoints (chars 60-80): 
+  Actual chars 60-80: 
+  Match: True
+--- line 1 ---
+  Pattern: '            "Type or paste your text here.\\n\\n"'
+  Pattern length: 47
+  Found at: 53246
+  Pattern codepoints (chars 60-80): 
+  Actual chars 60-80: 
+  Match: True
+--- line 2 ---
+  Pattern: '            "Tip: long inputs are split automatically by Kokoro\'s tokenizer —\\n"'
+  Pattern length: 80
+  Found at: 53294
+  Pattern codepoints (chars 60-80): U+006F('o'), U+0072('r'), U+006F('o'), U+0027("'"), U+0073('s'), U+0020(' '), U+0074('t'), U+006F('o'), U+006B('k'), U+0065('e'), U+006E('n'), U+0069('i'), U+007A('z'), U+0065('e'), U+0072('r'), U+0020(' '), U+2014('—'), U+005C('\\'), U+006E('n'), U+0022('"')
+  Actual chars 60-80: U+006F('o'), U+0072('r'), U+006F('o'), U+0027("'"), U+0073('s'), U+0020(' '), U+0074('t'), U+006F('o'), U+006B('k'), U+0065('e'), U+006E('n'), U+0069('i'), U+007A('z'), U+0065('e'), U+0072('r'), U+0020(' '), U+2014('—'), U+005C('\\'), U+006E('n'), U+0022('"')
+  Match: True
+--- line 3 ---
+  Pattern: '            "you can paste entire chapters without performance concerns.\\n\\n"'
+  Pattern length: 77
+  Found at: 53375
+  Pattern codepoints (chars 60-80): U+0063('c'), U+0065('e'), U+0020(' '), U+0063('c'), U+006F('o'), U+006E('n'), U+0063('c'), U+0065('e'), U+0072('r'), U+006E('n'), U+0073('s'), U+002E('.'), U+005C('\\'), U+006E('n'), U+005C('\\'), U+006E('n'), U+0022('"')
+  Actual chars 60-80: U+0063('c'), U+0065('e'), U+0020(' '), U+0063('c'), U+006F('o'), U+006E('n'), U+0063('c'), U+0065('e'), U+0072('r'), U+006E('n'), U+0073('s'), U+002E('.'), U+005C('\\'), U+006E('n'), U+005C('\\'), U+006E('n'), U+0022('"')
+  Match: True
+--- line 4 ---
+  Pattern: '            "Or drop a .txt / .pdf / .epub file here, or click “Open…”."'
+  Pattern length: 72
+  Found at: -1
+  Pattern codepoints (chars 60-80): U+0063('c'), U+006B('k'), U+0020(' '), U+201C('“'), U+004F('O'), U+0070('p'), U+0065('e'), U+006E('n'), U+2026('…'), U+201D('”'), U+002E('.'), U+0022('"')
+--- line 5 ---
+  Pattern: '        )'
+  Pattern length: 9
+  Found at: 16726
+  Pattern codepoints (chars 60-80): 
+  Actual chars 60-80: 
+  Match: True
+
+
+Bytes around 'Or drop' (position 53466):
+'    "Or drop a .txt / .pdf / .epub file here, or click \\u201cOpen\\u2026\\u201d."\n        )\n     '
+
+Codepoint diversity:

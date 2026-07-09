@@ -14,7 +14,7 @@ See `PLAN.md` for the full roadmap.
 
 ---
 
-## ✨ Features (Phase 1)
+## ✨ Features (Phase 1 + Phase 2)
 
 | Status | Feature |
 | --- | --- |
@@ -27,6 +27,7 @@ See `PLAN.md` for the full roadmap.
 | ✅ | **Real-time streaming playback** *(Phase 2)* — hear audio as it generates, ~200 ms after clicking Generate |
 | ✅ | **In-app playback** — generated audio plays immediately via `QMediaPlayer` |
 | ✅ | **Stop / cancel** — clean cancellation of in-flight generations |
+| ✅ | **Multi-speaker dialogue mode** 🎭 *(Phase 2)* — switch voices mid-script with `[voice_name]:` markers; auto-detected, with an always-visible “Dialogue” button + one-click sample-script insertion |
 
 Roadmap items (Phase 2+) live in `PLAN.md`.
 
@@ -71,6 +72,84 @@ Or, from the project root:
 
 ```bash
 python -m kokoro_studio.gui
+```
+
+---
+
+## 🎭 Multi-Speaker Dialogue Mode
+
+Phase 2 ships a built-in multi-speaker mode for audiobooks, podcasts,
+and game dialogue. Switch voices mid-script by starting a line with
+a `[voice_name]:` marker — every line until the next marker is
+spoken in that voice.
+
+### How it works
+
+```text
+[af_heart]: Hello! My name is Heart.
+[am_adam]:  And I'm Adam. Nice to meet you.
+[af_heart]: Let me show you the multi-speaker mode.
+```
+
+- **One marker per line, at the start** (leading whitespace allowed).
+- **Lines after a marker** stay on the previous voice until the next
+  marker — so a single tag can cover an entire multi-line speaker turn.
+- **Lines BEFORE the first marker** use the dropdown's currently-selected
+  voice (so a script can have narration followed by tagged dialogue).
+- **Unknown voice tokens** fall back to the dropdown's default voice,
+  with a warning surfaced in the GUI before synthesis.
+- **A short 0.25-s silence** is inserted between segments so turns feel
+  natural rather than jump-cut.
+
+### Discoverability
+
+- The editor **placeholder** itself previews the syntax so first-time
+  users see it the moment they open the app.
+- An always-visible **🎭 Dialogue** button in the action row opens a
+  help dialog with the syntax cheatsheet AND a one-click **“Insert
+  sample script”** button — load a working demo into the editor and
+  hit Generate in under 5 seconds.
+- Once you type the first marker, an inline chip updates live to show
+  “N speaker turn(s): voice1, voice2, …” so you always know what the
+  parser sees.
+- The Settings dialog's About tab now lists “multi-speaker dialogue mode”
+  in the feature list.
+
+### Worked example
+
+| Script in editor | Spoken output |
+| --- | --- |
+| `[af_heart]: Welcome back.` | single voice af_heart says “Welcome back.” |
+| `[af_heart]: Hello![am_adam]: Hi!` | af_heart says “Hello!”, then 0.25 s pause, then am_adam says “Hi!” |
+| Multi-line turn with no second marker | the entire block inherits the first voice |
+| `[unknown_voice]: test` | falls back to the dropdown voice, warning shown |
+
+### Programmatic API
+
+Engine-level (no GUI needed):
+
+```python
+from kokoro_studio.engine import generate_speech
+generate_speech(
+    text="[af_heart]: Hello![am_adam]: Hi there!",
+    voice="af_heart",
+    output_path="dialogue.wav",
+    multi_speaker=True,    # <- activates the marker parser
+    speaker_gap_s=0.25,    # pause between turns
+)
+```
+
+Parser-level (for custom batch / CLI tools):
+
+```python
+from kokoro_studio.dialogue import parse_dialogue, summarize_voices
+
+segments, warnings = parse_dialogue(
+    text,
+    default_voice="af_heart",
+    known_voices={"af_heart", "am_adam", "bf_isabella", ...},
+)
+print(summarize_voices(segments))  # 'af_heart, am_adam'
 ```
 
 ---

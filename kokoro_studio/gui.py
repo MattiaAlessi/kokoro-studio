@@ -87,7 +87,13 @@ if not _HAS_PYSIDE6:
     QTimer = object            # type: ignore[assignment,misc]
     QIODevice = object         # type: ignore[assignment,misc]
     QAudioSink = object        # type: ignore[assignment,misc]
-    QMediaDevices = object     # type: ignore[assignment,misc]  
+    QMediaDevices = object     # type: ignore[assignment,misc]
+    # QDialog is the base class of SettingsDialog which is declared at
+    # module scope; without this stub the parse fails when PySide6 is
+    # missing (headless CI). Other QtWidgets classes (QApplication,
+    # QStringListModel, etc.) are only referenced inside method bodies
+    # that main() never invokes without Qt available.
+    QDialog = object            # type: ignore[assignment,misc]
 
 try:
     # Streaming audio backend (Phase 2 - Real-Time Playback).
@@ -406,7 +412,13 @@ class SynthesisWorker(QThread):
     # (rather than already-encoded bytes) keeps the worker's contract
     # simple and lets the consumer format-convert if needed. `object`
     # is the canonical PySide6 signal type for arbitrary Python data.
-    chunk_ready = Signal(int, object)
+    chunk_ready = Signal(int, int, object)  # (segment_idx, chunk_idx, audio_chunk)
+    # Fired ONCE per segment transition in multi-speaker mode (i.e.
+    # the FIRST chunk of a new voice arrives). In single-speaker mode
+    # this fires exactly once with seg_idx=0 at the first chunk. The
+    # main window uses it to update the status bar with "Speaker
+    # X/Y: <voice>" without having to poll on every chunk.
+    segment_started = Signal(int)
     finished_ok = Signal(str, float, object)
     failed = Signal(str)
 
@@ -431,6 +443,8 @@ class SynthesisWorker(QThread):
         output_path: str,
         output_format: str,
         pronunciation_rules: Optional[dict] = None,
+        multi_speaker: bool = False,
+        speaker_gap_s: float = 0.25,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -446,6 +460,21 @@ class SynthesisWorker(QThread):
         self._pronunciation_rules = (
             dict(pronunciation_rules) if pronunciation_rules else None
         )
+        # Phase 2 — Multi-Speaker Dialogue Mode. When True the engine
+        # parses `[voice_name]:` markers in `text` and synthesises each
+        # segment with its own voice. `speaker_gap_s` is the silence
+        # inserted between segments (default 0.25 s).
+        self._multi_speaker = multi_speaker
+        self._speaker_gap_s = speaker_gap_s
+        # Tracks the previous segment index in `_on_chunk` to detect
+        # "speaker changed" transitions in the stream of chunks. The
+        # engine emits multiple chunks per segment; we surface one
+        # "now speaking voice X" event per actual transition.
+        self._last_seg_idx: int = -1
+        # Cumulative chunk counter across segments — engine's
+        # chunk_idx resets per-segment so we maintain a global
+        # counter that the status bar uses for ETA / progress.
+        self._cumulative_chunk_count: int = 0
         self._stop_requested = False
         # Module-level on the worker so the chunk callback can mutate it.
         self._cumulative_samples = 0
@@ -460,7 +489,7 @@ class SynthesisWorker(QThread):
     def _stop_check(self) -> bool:
         return self._stop_requested
 
-    def _on_chunk(self, idx: int, audio_chunk: np.ndarray) -> None:
+    def _on_chunk(self, seg_idx: int, chunk_idx: int, audio_chunk: np.ndarray) -> None:
         self._cumulative_samples += len(audio_chunk)
         cum_seconds = self._cumulative_samples / SAMPLE_RATE
 
@@ -487,16 +516,43 @@ class SynthesisWorker(QThread):
                 eta_seconds = remaining_audio / rate
 
         # Broadcast progress (status bar / progress bar).
-        self.progress.emit(idx + 1, idx + 1, cum_seconds, eta_seconds)
-        # Broadcast the raw chunk so streaming playback can route it
-        # into a QAudioSink via a thread-safe ring buffer. Emitting
-        # AFTER progress means the status bar updates before audio
-        # actually plays (small but pleasant).
-        self.chunk_ready.emit(idx, audio_chunk)
+        # Broadcast progress + raw chunk.
+        #   * `progress` keeps the (chunks_done, chunks_visible) layout
+        #     so the existing chunk-based ETA logic in
+        #     `_on_synthesis_progress` keeps working unchanged.
+        #   * `chunk_ready` carries BOTH (seg_idx, chunk_idx) so the
+        #     streaming consumer can route byte deltas AND the GUI
+        #     status bar can render "Speaker X/Y: <voice>" once it
+        #     sees seg_idx flip.
+        # We emit progress BEFORE chunk_ready so the status bar updates
+        # a tick before the audio hits the ring buffer.
+        # Cumulative chunk counter so the status bar shows
+        # monotonically-growing "chunk N" instead of resetting
+        # to 1 every speaker transition.
+        self._cumulative_chunk_count += 1
+        self.progress.emit(
+            self._cumulative_chunk_count,
+            self._cumulative_chunk_count,
+            cum_seconds,
+            eta_seconds,
+        )
+        # Kept the local chunk_idx on chunk_ready so downstream
+        # consumers can correlate per-segment if needed.
+        _unused_local_chunk_idx = chunk_idx  # noqa: F841
+        # Detect speaker transition in the stream of chunks: the
+        # engine emits many chunks per segment, so we surface
+        # `segment_started` only on the first chunk of each new
+        # segment (or once at startup in single-speaker mode).
+        if seg_idx != self._last_seg_idx:
+            self._last_seg_idx = seg_idx
+            self.segment_started.emit(seg_idx)
+        self.chunk_ready.emit(seg_idx, chunk_idx, audio_chunk)
 
     # ---- main entry ----------------------------------------------------
     def run(self) -> None:  # noqa: D401 — Qt calls this on .start()
         self._cumulative_samples = 0
+        self._cumulative_chunk_count = 0
+        self._last_seg_idx = -1  # reset speaker-transition tracker
         # NOTE: the engine already mirrors useful diagnostics to sys.stderr,
         # so the worker intentionally stays quiet and just signals progress.
         try:
@@ -507,6 +563,8 @@ class SynthesisWorker(QThread):
                 output_path=self._output_path,
                 output_format=self._output_format,
                 pronunciation_rules=self._pronunciation_rules,
+                multi_speaker=self._multi_speaker,
+                speaker_gap_s=self._speaker_gap_s,
                 on_chunk=self._on_chunk,
                 stop_check=self._stop_check,
             )
@@ -835,7 +893,7 @@ class SettingsDialog(QDialog):
             "<a href='https://huggingface.co/hexgrad/Kokoro-82M'>Kokoro-82M"
             "</a> neural TTS model \u2014 29 built-in voices, multi-format "
             "export (WAV / MP3 / FLAC / OGG), a pronunciation dictionary, "
-            "and a growing set of audiobook / batch features.<br><br>"
+            "<b>multi-speaker dialogue mode</b>, and a growing set of audiobook / batch features.<br><br>"
             f"<b>Created by:</b> "
             f"<a href='{creator_url}'>{self._CREATOR_HANDLE}</a> on GitHub."
             "<br><br>"
@@ -1120,6 +1178,28 @@ class KokoroStudioMain(QMainWindow):
             else "streaming unavailable: no local audio output device"
         )
 
+        # Phase 2 — Multi-Speaker Dialogue Mode (Phase 2 next-up).
+        # `self._dialogue_chip` is the inline label that shows a
+        # live "🎭 N speakers detected: voice1, voice2, …" hint as
+        # soon as the user types the first `[voice]:` marker. It's
+        # hidden when no markers are present so single-speaker
+        # scripts don't clutter the controls panel.
+        self._dialogue_chip = None  # type: ignore[assignment]
+        # `_dialogue_chip_row` wraps the chip + help button in a
+        # single QWidget so they can be hidden together by
+        # `_refresh_dialogue_chip`. Set to None here; the actual
+        # widget is built by `_build_controls_panel` after this
+        # __init__ returns. The `getattr` defensive read in
+        # `_refresh_dialogue_chip` covers the pre-build window.
+        self._dialogue_chip_row = None  # type: ignore[assignment]
+        self._dialogue_help_btn = None  # type: ignore[assignment]
+        # Populated in `_on_generate_clicked` from `parse_dialogue`;
+        # the SynthesisWorker reads it through the multi_speaker flag,
+        # but the main window keeps a copy so `_on_segment_started`
+        # can resolve the voice name for a given segment index without
+        # re-parsing the editor text.
+        self._current_segments: list = []
+
         # Build (creates every widget, including _voice_list and _voice_readout).
         self._build_ui()
         self._wire_signals()
@@ -1386,6 +1466,49 @@ class KokoroStudioMain(QMainWindow):
 
         layout.addLayout(row1)
 
+        # ---- Dialogue-mode chip (Phase 2) ---------------
+        # Inline hint that pops in whenever the editor text contains
+        # parseable `[voice_name]:` markers. Tooltip doubles as a
+        # syntax cheatsheet so users learn what triggers it.
+        chip_row_inner = QHBoxLayout()
+        chip_row_inner.setSpacing(8)
+        self._dialogue_chip = QLabel("")
+        self._dialogue_chip.setObjectName("DialogueChip")
+        self._dialogue_chip.setStyleSheet(
+            "color: #9178FF; background-color: rgba(123,97,255,0.10);"
+            " border: 1px solid rgba(123,97,255,0.35);"
+            " border-radius: 6px; padding: 5px 10px;"
+            " font-size: 11px; font-weight: 600;"
+        )
+        self._dialogue_chip.setToolTip(
+            "Multi-speaker dialogue mode is ON.\n\n"
+            "Type a [voice_name]: marker at the start of a line"
+            " to switch voices mid-script:\n"
+            "  [af_heart]: Hello!\n"
+            "  [am_adam]: Hi there.\n\n"
+            "Lines without markers keep the previous voice."
+            " Lines before the first marker use the"
+            " dropdown's currently-selected voice."
+        )
+        chip_row_inner.addWidget(self._dialogue_chip, 1)
+        # Small ? button next to the chip pops a modal with
+        # example scripts.
+        self._dialogue_help_btn = QPushButton("?")
+        self._dialogue_help_btn.setProperty("role", "ghost")
+        self._dialogue_help_btn.setFixedSize(28, 26)
+        self._dialogue_help_btn.setToolTip(
+            "Show dialogue syntax examples"
+        )
+        self._dialogue_help_btn.clicked.connect(
+            self._on_dialogue_help_clicked
+        )
+        chip_row_inner.addWidget(self._dialogue_help_btn)
+        # Wrap in an outer QWidget so we can hide the entire row
+        # (chip + button) when no markers are detected.
+        self._dialogue_chip_row = QWidget()
+        self._dialogue_chip_row.setLayout(chip_row_inner)
+        self._dialogue_chip_row.setVisible(False)
+        layout.addWidget(self._dialogue_chip_row)
         # ---- Row 2: action buttons ----
         row2 = QHBoxLayout()
         row2.setSpacing(8)
@@ -1801,16 +1924,156 @@ class KokoroStudioMain(QMainWindow):
             self._refresh_output_path()
             self._update_button_states()
 
-    def _refresh_voice_readout(self) -> None:
-        if not self._current_voice:
-            self._voice_readout.setText("—")
+    # ----------------- Slot: dialogue chip refresh (Phase 2)
+    def _refresh_dialogue_chip(self, text: str) -> None:
+        """Show / hide the inline multi-speaker chip row.
+
+        Cheap regex pre-check (`detect_dialogue`) runs on every
+        keystroke; the full parser only runs when at least one
+        marker is present so the row stays hidden for
+        single-speaker scripts (no GUI clutter).
+"""
+        try:
+            from kokoro_studio.dialogue import (
+                detect_dialogue, parse_dialogue, summarize_voices,
+            )
+        except ImportError:
+            return  # dialogue module gone; skip silently
+        # Use getattr defensively because textChanged can fire
+        # before `_build_controls_panel` has set up the chip
+        # widget (rare in practice but possible if a caller does
+        # something like `setPlainText` from __init__).
+        chip = getattr(self, "_dialogue_chip", None)
+        row = getattr(self, "_dialogue_chip_row", None)
+        if chip is None or row is None:
+            return  # pre-build or mid-teardown window
+        if not detect_dialogue(text):
+            row.setVisible(False)
             return
-        info = get_voice_info(self._current_voice)
-        self._voice_readout.setText(
-            f"{self._current_voice}  ·  Grade {info['grade']}"
+        segs, _ = parse_dialogue(
+            text,
+            default_voice=self._current_voice or DEFAULT_VOICE,
+        )
+        summary = summarize_voices(segs)
+        if summary:
+            chip.setText(
+                f"\U0001F3AD {len(segs)} speaker turn(s): {summary}"
+            )
+            row.setVisible(True)
+        else:
+            row.setVisible(False)
+
+    # ----------------- Slot: per-segment status updates
+    def _on_segment_started(self, seg_idx: int) -> None:
+        """Update status bar with the active speaker on transitions.
+
+        Connected to `SynthesisWorker.segment_started`. Resolves the
+        voice name from `self._current_segments` so we don't
+        re-parse the editor text on every chunk arrival. In
+        single-speaker mode the segment list is empty and we
+        leave the chunk-based progress to do its job.
+"""
+        if not self._current_segments:
+            return
+        if seg_idx >= len(self._current_segments):
+            return
+        voice = self._current_segments[seg_idx].voice
+        total = len(self._current_segments)
+        self._status_label.setText(
+            f"Speaker {seg_idx + 1}/{total}: {voice} \u00b7"
+            f" generating..."
         )
 
-    # ---------------------------------------------------- Slot: voice/langs
+    # ----------------- Slot: dialogue help button (Phase 2)
+    def _on_dialogue_help_clicked(self) -> None:
+        """Popup a modal dialog with multi-speaker syntax examples.
+
+        Triggered by the small `?` button next to the inline chip.
+        Static content; cheap to construct on each click.
+"""
+        # Module-level constant avoids re-parsing the literal on
+        # every click. Defined right above the class so any user
+        # can edit it without hunting through nested quotes.
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Multi-Speaker Dialogue Mode")
+        dlg.resize(640, 480)
+        dlg.setStyleSheet(SETTINGS_QSS)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(10)
+
+        title = QLabel("\U0001F3AD  Multi-Speaker Dialogue Mode")
+        title.setObjectName("SettingsH1")
+        root.addWidget(title)
+
+        intro = QLabel(
+            "Put a <code>[voice_name]:</code> marker at the start of a"
+            " line to switch voices mid-script. Everything below the"
+            " marker (until the next marker, or end of file) is"
+            " spoken in that voice.<br><br>"
+            "<b>Tips:</b>"
+            "<ul>"
+            "<li>Lines BEFORE the first marker use the dropdown's"
+            " currently-selected voice.</li>"
+            "<li>Lines without a marker stay on the previous voice"
+            " \u2014 useful for multi-line turns.</li>"
+            "<li>Unknown voice tokens fall back to the dropdown's"
+            " default (with a warning).</li>"
+            "<li>A short silence is inserted between segments so"
+            " turns feel natural.</li>"
+            "</ul>"
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        intro.setObjectName("SettingsBlock")
+        intro.setOpenExternalLinks(True)
+        root.addWidget(intro)
+
+        sample = QPlainTextEdit(dlg)
+        sample.setReadOnly(True)
+        sample.setStyleSheet(
+            "background-color: #1F2329; color: #E8EAED;"
+            " border: 1px solid #252932; border-radius: 8px;"
+            " padding: 10px;"
+            " font-family: 'Consolas', 'Cascadia Code',"
+            " 'JetBrains Mono', monospace;"
+            " font-size: 12px;"
+        )
+        # Triple-quoted string dodges the adjacent-literal
+        # concatenation pitfall that bit earlier scripts.
+        sample.setPlainText(DIALOGUE_HELP_SAMPLE)
+        sample.setMinimumHeight(180)
+        root.addWidget(sample, 1)
+
+        bbox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        close_btn = bbox.button(QDialogButtonBox.StandardButton.Ok)
+        close_btn.setText("Got it")
+        close_btn.setProperty("role", "primary")
+        bbox.accepted.connect(dlg.accept)
+        root.addWidget(bbox)
+
+        dlg.exec()
+
+    def _refresh_voice_readout(self) -> None:
+        """Update the SELECTED VOICE label with the current voice.
+
+        Called from `_repopulate_voice_list` and `_on_voice_changed`
+        so the readout always reflects `self._current_voice`. When
+        the voice library is empty (e.g. user picked a non-English
+        lang that has no bundled voices) we render a dash instead
+        of the default 'af_heart' to make the empty state obvious.
+"""
+        if not self._current_voice:
+            self._voice_readout.setText("\u2014")
+            return
+        info = get_voice_info(self._current_voice)
+            # (use the dashboard's selected voice + grade)
+        self._voice_readout.setText(
+            f"{self._current_voice}  \u00b7  Grade {info['grade']}"
+        )
+
+    # ----- Voice list helpers (pre-existing) -----
     def _on_voice_changed(self, current: Optional[QListWidgetItem],
                           _previous: Optional[QListWidgetItem]) -> None:
         if current is None:
@@ -1834,6 +2097,11 @@ class KokoroStudioMain(QMainWindow):
         words = len(text.split()) if text.strip() else 0
         self._counter_label.setText(f"{chars:,} chars  ·  {words:,} words")
         self._update_button_states()
+        # Multi-speaker dialogue detection. Cheap regex-based check
+        # runs on every keystroke; the full parser only runs when
+        # the detector finds at least one marker (otherwise the
+        # chip stays hidden).
+        self._refresh_dialogue_chip(text)
 
     # ---------------------------------------- Slot: pronunciation
     def _load_pron_dict(self) -> None:
@@ -2297,6 +2565,60 @@ class KokoroStudioMain(QMainWindow):
         fmt = self._current_output_format()
         out_path = self._output_edit.text().strip() \
             or _default_output_path(self._current_voice or DEFAULT_VOICE, fmt)
+
+        # ---- Multi-Speaker Dialogue pre-parse (Phase 2) ------
+        # We parse BEFORE handing off so we can warn about
+        # unknown voices and populate the segment lookup table
+        # for the status bar during synthesis. `detect_dialogue`
+        # is a cheap regex precheck so we don't recompute the
+        # full parser when the editor has no markers.
+        from kokoro_studio.dialogue import (
+            detect_dialogue, parse_dialogue, summarize_voices,
+        )
+        self._current_segments = []
+        use_multi = False
+        if detect_dialogue(text):
+            segs, warnings = parse_dialogue(
+                self._editor.toPlainText(),
+                default_voice=self._current_voice or DEFAULT_VOICE,
+                known_voices=set(VOICES.keys()),
+            )
+            self._current_segments = segs
+            if warnings:
+                # Engine has documented fallback behaviour, so the
+                # dialog defaults to Yes — aborting on a typo would
+                # feel hostile.
+                warn_text = "\n  \u2022 ".join(warnings)
+                ans = QMessageBox.question(
+                    self,
+                    "Unknown voices in dialogue mode",
+                    f"{len(warnings)} marker(s) use voice names"
+                    f" not in the bundled catalog:\n\n"
+                    f"  \u2022 {warn_text}\n\n"
+                    f"They will fall back to the currently-selected"
+                    f" voice '{self._current_voice or DEFAULT_VOICE}'.\n\n"
+                    "Continue?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if ans != QMessageBox.Yes:
+                    self._status_label.setText(
+                        "Generation cancelled (dialogue warnings)."
+                    )
+                    return
+            # Engage multi-speaker mode whenever markers are present.
+            # Engine handles single-segment scripts transparently
+            # so we don't need a final guard. (Note: the v1 review's
+            # "any voice diversity" gate was removed — markers are
+            # an explicit user signal, so routing through the
+            # multi-speaker engine is the right default.)
+            use_multi = True
+        if use_multi:
+            self._status_label.setText(
+                f"Multi-speaker dialogue: {len(self._current_segments)}"
+                f" turn(s) \u00b7 {summarize_voices(self._current_segments)}"
+            )
+
         self._start_synthesis(
             text=text,
             voice=self._current_voice or DEFAULT_VOICE,
@@ -2308,6 +2630,7 @@ class KokoroStudioMain(QMainWindow):
             pronunciation_rules=(
                 self._pron_rules if self._pron_checkbox.isChecked() else None
             ),
+            multi_speaker=use_multi,
         )
 
     def _on_preview_clicked(self) -> None:
@@ -2358,6 +2681,8 @@ class KokoroStudioMain(QMainWindow):
         auto_play: bool,
         label: str,
         pronunciation_rules: Optional[dict] = None,
+        multi_speaker: bool = False,
+        speaker_gap_s: float = 0.25,
     ) -> None:
         if self._worker is not None and self._worker.isRunning():
             return  # already running; ignore
@@ -2397,13 +2722,14 @@ class KokoroStudioMain(QMainWindow):
             output_path=output_path,
             output_format=output_format,
             pronunciation_rules=pronunciation_rules,
-            parent=self,
+            multi_speaker=multi_speaker,
+            speaker_gap_s=speaker_gap_s,
         )
-        self._worker.progress.connect(self._on_synthesis_progress)
-        # Streaming playback routing: the worker's `chunk_ready` signal
-        # carries the raw float32 numpy chunk; we forward it to the
-        # PcmRingBuffer (if streaming is on). The slot is a no-op when
-        # streaming is disabled — we disconnect/connect per run below.
+        self._worker.chunk_ready.connect(self._on_streaming_chunk)
+        # Multi-speaker dialogue: fires once per voice transition
+        # so the status bar can show "Speaker X/Y: <voice>." In
+        # single-speaker mode fires exactly once at startup.
+        self._worker.segment_started.connect(self._on_segment_started)
         self._worker.chunk_ready.connect(self._on_streaming_chunk)
         # Capture auto_play in a lambda closure (default arg avoids late-binding).
         self._worker.finished_ok.connect(
@@ -2660,7 +2986,7 @@ class KokoroStudioMain(QMainWindow):
             except Exception:
                 pass
 
-    def _on_streaming_chunk(self, _idx: int, chunk: np.ndarray) -> None:
+    def _on_streaming_chunk(self, _seg_idx: int, _chunk_idx: int, chunk: np.ndarray) -> None:
         """Route an incoming Kokoro chunk into the streaming ring buffer.
 
         Slot fires on the GUI thread (Qt signal-slot connection delivers

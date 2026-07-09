@@ -1,0 +1,17 @@
+setPlaceholderText(
+            "Type or paste your text here.\n\n"
+            "Tip: long inputs are split automatically by Kokoro's tokenizer —\n"
+            "you can paste entire chapters without performance concerns.\n\n"
+            "Or drop a .txt / .pdf / .epub file here, or click \u201cOpen\u2026\u201d."
+        )
+        f = QFont()
+        f.setPointSize(11)
+        self._editor.setFont(f)
+        layout.addWidget(self._editor, 1)
+
+        return panel
+
+    def _build_controls_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Panel")
+   
