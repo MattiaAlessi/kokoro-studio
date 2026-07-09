@@ -9,6 +9,7 @@ The package is organised as follows:
   * `kokoro_studio.engine`          Kokoro-82M wrapper + multi-format audio writer
   * `kokoro_studio.document_loader` TXT / PDF / EPUB parsers
   * `kokoro_studio.pronunciation`   pronunciation dictionary (load / save / apply)
+  * `kokoro_studio.streaming`       real-time PCM streaming (Phase 2)
   * `kokoro_studio.gui`             PySide6 main window
 """
 
@@ -16,10 +17,10 @@ from __future__ import annotations
 
 # Eager submodule imports so that `import kokoro_studio; kokoro_studio.engine`
 # works (otherwise `__all__` alone is just a hint for `from kokoro_studio
-# import *` and the actual symbols stay unbound on the package). All four
+# import *` and the actual symbols stay unbound on the package). All
 # submodules import their heavy deps lazily, so the cost at import time
 # is just the (tiny) Python module load.
-from kokoro_studio import engine, document_loader, pronunciation, gui
+from kokoro_studio import engine, document_loader, pronunciation, streaming, gui
 
 __version__ = "0.1.0"
 __author__ = "Matti"
@@ -31,5 +32,6 @@ __all__ = [
     "engine",
     "document_loader",
     "pronunciation",
+    "streaming",
     "gui",
 ]

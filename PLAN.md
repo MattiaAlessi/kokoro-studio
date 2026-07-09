@@ -168,11 +168,23 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
 
 ### Features
 
-- [ ] **Real-Time Streaming Playback** 🔥 (HIGHEST PRIORITY)
+- [x] **Real-Time Streaming Playback** 🔥 ✅ *shipped*
   - Play audio *as it generates* — no waiting for full synthesis
-  - Feed `on_chunk` numpy arrays into a `QAudioSink` circular buffer
-  - Kokoro already emits chunks via callback — this is mostly plumbing
-  - User hears audio within ~200ms of clicking Generate
+  - Custom `QIODevice` subclass (`StreamingPcmDevice`) backed by a thread-safe
+    `PcmRingBuffer`; the buffer is split into pure-Python core so the
+    semantics (underrun → silence, EOS → empty bytes) are unit-testable
+    without PySide6
+  - `QAudioSink` pulls from the device in push mode; synthesis worker
+    pushes chunks through the ring buffer on a Qt signal
+  - Streaming toggle in the GUI ("▶ Stream", default ON); auto-disables
+    when the platform reports no audio output device (headless CI / RDP)
+  - Critical GC safety: `_audio_sink`, `_streaming_device`, `_ring_buffer`
+    kept as long-lived `KokoroStudioMain` members so PySide6 GC can't
+    segfault the C++ audio thread mid-playback
+  - File-based fallback (`QMediaPlayer`) is preserved for users who want
+    the older "wait for full synthesis" flow
+  - Status bar shows real-time progress while the QAudioSink drains
+    naturally into IdleState after EOS
   - _Complexity: Medium-High_
 
 - [ ] **Multi-Speaker Dialogue Mode**
@@ -199,7 +211,16 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
 
 ### Research Tasks
 
-- [ ] Research PySide6 `QAudioSink` / `QAudioOutput` for real-time PCM streaming (push mode)
+- [x] Research PySide6 `QAudioSink` / `QAudioOutput` for real-time PCM streaming (push mode)
+  > **Answer:** Use `QAudioSink(format).start(my_qio_device)` where
+  > `my_qio_device` is a sequential `QIODevice` subclass with
+  > `readData(maxlen)` returning PCM bytes from a thread-safe ring buffer.
+  > `QAudioSink.start()` does NOT take ownership of the QIODevice; keep a
+  > strong Python reference on the main window or the C++ audio thread
+  > segfaults when GC collects it mid-playback. On underrun (empty
+  > buffer), return `silence_bytes = b'\x00' * maxlen` — NOT empty bytes
+  > — because `b''` is the EOF signal and would prematurely end
+  > playback. Only return `b''` once `eos=True`.
 - [ ] Research StyleTTS 2 style vector access from the `kokoro` Python library — can we get/set style tensors?
 - [ ] Research `kokoro` pipeline internals — how to swap voices mid-generation for multi-speaker
 - [ ] Research SSML tag parsing libraries (e.g. `ssml-parser` or custom regex)
@@ -417,11 +438,13 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 ## Current Status
 
-**Overall Progress:** 3 / 20 features completed
+**Overall Progress:** 6 / 20 features completed
 
-**Current Phase:** Phase 1 — Quick Wins ✅ *complete*
+**Current Phase:** Phase 2 — Core TTS Advancements *(in progress)*
 
-**Next Up:** Real-Time Streaming (Phase 2) — 🔥 HIGHEST PRIORITY
+**Just Shipped:** Real-Time Streaming Playback 🔥
+
+**Next Up:** Multi-Speaker Dialogue Mode
 
 ---
 

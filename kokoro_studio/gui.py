@@ -38,11 +38,13 @@ from typing import Optional
 
 try:
     from PySide6.QtCore import (
-        QEvent, QObject, QSize, QStandardPaths, Qt, QThread, QTimer,
-        QUrl, Signal,
+        QEvent, QIODevice, QObject, QSize, QStandardPaths, Qt, QThread,
+        QTimer, QUrl, Signal,
     )
     from PySide6.QtGui import QAction, QFont, QKeySequence
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimedia import (
+        QAudioOutput, QAudioSink, QMediaDevices, QMediaPlayer,
+    )
     from PySide6.QtWidgets import (
         QAbstractItemView, QApplication, QCheckBox, QComboBox,
         QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
@@ -73,16 +75,34 @@ if not _HAS_PYSIDE6:
     Signal = (                 # type: ignore[assignment,misc]
         lambda *args, **kwargs: None
     )
-    # QAction / QKeySequence / QEvent / QTabWidget / QTimer are referenced
-    # only inside methods that never run when PySide6 is missing (main()
-    # gates on _HAS_PYSIDE6 before constructing KokoroStudioMain). We
-    # expose harmless stubs so editor auto-complete and type-checkers flag
-    # the names properly.
+    # QAction / QKeySequence / QEvent / QTabWidget / QTimer / QIODevice /
+    # QAudioSink / QMediaDevices are referenced only inside methods that
+    # never run when PySide6 is missing (main() gates on _HAS_PYSIDE6 before
+    # constructing KokoroStudioMain). We expose harmless stubs so editor
+    # auto-complete and type-checkers flag the names properly.
     QAction = object           # type: ignore[assignment,misc]
     QKeySequence = object      # type: ignore[assignment,misc]
     QEvent = object            # type: ignore[assignment,misc]
     QTabWidget = object        # type: ignore[assignment,misc]
-    QTimer = object            # type: ignore[assignment,misc]  
+    QTimer = object            # type: ignore[assignment,misc]
+    QIODevice = object         # type: ignore[assignment,misc]
+    QAudioSink = object        # type: ignore[assignment,misc]
+    QMediaDevices = object     # type: ignore[assignment,misc]  
+
+try:
+    # Streaming audio backend (Phase 2 - Real-Time Playback).
+    # Mirrors the lazy-import pattern used for PySide6 above:
+    # `sd` is bound at module scope so BOTH `_start_streaming_sink`
+    # AND `_sd_stream_callback` (which is a class method, NOT a
+    # closure inside _start_streaming_sink) can reference it.
+    # A previous version lazy-imported inside `_start_streaming_sink`
+    # only, which made the callback raise `NameError: name 'sd'
+    # is not defined` on EOS.
+    import sounddevice as sd  # type: ignore[import-not-found]
+    _HAS_SOUNDDEVICE = True
+except ImportError:
+    sd = None  # type: ignore[assignment]
+    _HAS_SOUNDDEVICE = False
 
 import numpy as np
 
@@ -99,6 +119,12 @@ from kokoro_studio.engine import (  # type: ignore
     generate_speech,
     get_voice_info,
     list_voices,
+)
+from kokoro_studio.streaming import (  # type: ignore
+    PcmRingBuffer,
+    StreamingPcmDevice,
+    default_audio_output_is_available,
+    make_kokoro_audio_format,
 )
 
 
@@ -374,6 +400,13 @@ class SynthesisWorker(QThread):
     """
 
     progress = Signal(int, int, float, float)
+    # Emitted on every Kokoro chunk with the audio ndarray. Used by the
+    # main window to push chunks into the streaming PCM ring buffer
+    # (Phase 2 "Real-Time Streaming Playback"). Emitting the raw array
+    # (rather than already-encoded bytes) keeps the worker's contract
+    # simple and lets the consumer format-convert if needed. `object`
+    # is the canonical PySide6 signal type for arbitrary Python data.
+    chunk_ready = Signal(int, object)
     finished_ok = Signal(str, float, object)
     failed = Signal(str)
 
@@ -453,10 +486,13 @@ class SynthesisWorker(QThread):
                 remaining_audio = max(0.0, est_total_audio - cum_seconds)
                 eta_seconds = remaining_audio / rate
 
-        # chunks_done = idx + 1; the engine doesn't know total upfront,
-        # so `chunks_visible` mirrors "n" — the progress bar stays
-        # indeterminate.
+        # Broadcast progress (status bar / progress bar).
         self.progress.emit(idx + 1, idx + 1, cum_seconds, eta_seconds)
+        # Broadcast the raw chunk so streaming playback can route it
+        # into a QAudioSink via a thread-safe ring buffer. Emitting
+        # AFTER progress means the status bar updates before audio
+        # actually plays (small but pleasant).
+        self.chunk_ready.emit(idx, audio_chunk)
 
     # ---- main entry ----------------------------------------------------
     def run(self) -> None:  # noqa: D401 — Qt calls this on .start()
@@ -1038,13 +1074,51 @@ class KokoroStudioMain(QMainWindow):
         self._pron_rules: dict = {}
         self._pron_dict_path = _default_output_dir() / "pronunciation.json"
 
-        # Audio playback
+        # Audio playback (file-based; used when streaming is OFF or as
+        # the post-synthesis re-play path for streamed runs).
         self._player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_out)
         # In PySide6/Qt6, volume lives on QAudioOutput (QMediaPlayer.setVolume
         # was removed in Qt 6).
         self._audio_out.setVolume(0.9)
+
+        # Real-time streaming playback (Phase 2). The default is ON
+        # because streaming is explicitly the "ElevenLabs-feel"
+        # headline feature in PLAN.md ("User hears audio within ~200ms
+        # of clicking Generate"). We probe the platform audio back-end
+        # once at startup; if it returns isNull(), the checkbox is
+        # disabled and we silently fall back to file-based playback.
+        #
+        # IMPORTANT: `_audio_sink` and `_streaming_device` MUST stay
+        # as long-lived Python references on the main window. PySide6
+        # does NOT take ownership of the QIODevice passed to
+        # `QAudioSink.start()`. If the only Python reference to
+        # either object is GC'd mid-playback, the C++ audio thread
+        # segfaults the next time it calls `readData`. We saw this
+        # exact failure mode in early debugging — keep these attrs.
+        # Streaming playback backend (Phase 2 - Real-Time Playback).
+        # We migrated from PySide6 QAudioSink (which proved silent
+        # on the user's Windows audio endpoint despite v1's Int16
+        # PCM fix) to sounddevice.OutputStream. PortAudio / WASAPI
+        # is more reliable and accepts float32 PCM directly. v1's
+        # `QAudioSink.error()` polling races are gone; we now
+        # check `_sd_stream.active` (PortAudio's own flag).
+        self._sd_stream: Optional[object] = None
+        self._ring_buffer: Optional[PcmRingBuffer] = None
+        # Volume carry-over for sounddevice: cached at start_time
+        # so the PortAudio callback never reads QAudioOutput off
+        # the GUI thread (avoids any cross-thread Qt ambiguity).
+        self._stream_volume: float = 0.9
+        self._stream_available: bool = default_audio_output_is_available()
+        # `last_stream_disabled_reason` is a short string shown in the
+        # stream checkbox tooltip when streaming is unavailable — kept
+        # as a member so we don't recompute class-level message keys
+        # on every tooltip refresh.
+        self._stream_disabled_reason: str = (
+            "" if self._stream_available
+            else "streaming unavailable: no local audio output device"
+        )
 
         # Build (creates every widget, including _voice_list and _voice_readout).
         self._build_ui()
@@ -1342,6 +1416,26 @@ class KokoroStudioMain(QMainWindow):
         row2.addSpacing(12)
         row2.addWidget(self._pron_count_label)
 
+        # Streaming playback toggle (Phase 2). Default ON — this is the
+        # headline feature. Disabled when the platform reports no audio
+        # back-end (headless CI / RDP / Linux container without a sound
+        # server). Tooltip doubles as a one-line explanation AND as the
+        # place users see the unavailability reason.
+        self._stream_checkbox = QCheckBox("▶ Stream")
+        # Honest default: only checked when streaming is actually
+        # available on this platform. With 
+        # the checkbox is unchecked + disabled and synthesis falls
+        # back to file-based playback transparently.
+        self._stream_checkbox.setChecked(self._stream_available)
+        self._stream_checkbox.setToolTip(
+            "Hear audio in real time as Kokoro generates it. "
+            "Disable to use the standard play-after-synthesis flow.\n"
+            f"{self._stream_disabled_reason}".rstrip()
+        )
+        self._stream_checkbox.setEnabled(self._stream_available)
+        row2.addSpacing(8)
+        row2.addWidget(self._stream_checkbox)
+
         self._play_btn = QPushButton("▶  Play last")
         self._play_btn.setProperty("role", "ghost")
         self._play_btn.setEnabled(False)
@@ -1403,6 +1497,12 @@ class KokoroStudioMain(QMainWindow):
         # Pronunciation controls.
         self._pron_checkbox.toggled.connect(self._on_pron_toggle)
         self._pron_edit_btn.clicked.connect(self._on_edit_pronunciation_clicked)
+
+        # Streaming toggle: when flipped off mid-run, mirrors no behaviour
+        # change because the sink is already provisioned/teardown-managed
+        # by the synthesis lifecycle. The slot exists so the user gets
+        # a tiny status-bar echo of the current setting.
+        self._stream_checkbox.toggled.connect(self._on_stream_toggle)
 
         # Voice list (filter dropdown removed — only voice selection matters).
         self._voice_list.currentItemChanged.connect(self._on_voice_changed)
@@ -1537,6 +1637,12 @@ class KokoroStudioMain(QMainWindow):
         # the user almost certainly meant Space-as-character, not "stop
         # my current generation so I can play the previous audio".
         if self._worker is not None and self._worker.isRunning():
+            return False
+        # If QAudioSink is still draining the stream (worker done, but
+        # the buffer hasn't reached EOS yet, or hasn't transitioned to
+        # IdleState), toggling QMediaPlayer would start a second audio
+        # source on the same hardware — ugly. Refuse the toggle then.
+        if self._ring_buffer is not None and not self._ring_buffer.is_eos():
             return False
         return bool(
             self._last_audio_path
@@ -2235,6 +2341,11 @@ class KokoroStudioMain(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._status_label.setText("Stopping…")
             self._stop_btn.setEnabled(False)
+            # Tear down streaming BEFORE requesting the worker to stop.
+            # If we did it the other way around, the audio thread could
+            # still hit readData() with a half-cleared ring buffer; this
+            # order keeps both sides well-defined.
+            self._stop_streaming_sink()
             self._worker.request_stop()
 
     def _start_synthesis(
@@ -2250,6 +2361,11 @@ class KokoroStudioMain(QMainWindow):
     ) -> None:
         if self._worker is not None and self._worker.isRunning():
             return  # already running; ignore
+        # Provision the streaming sink BEFORE creating the worker so that
+        # any early chunks arriving via chunk_ready() have somewhere to
+        # route through. Falls back to file-based playback if streaming
+        # is off or the platform reports no audio output device.
+        self._start_streaming_sink()
         # Show indeterminate progress & disable editing controls.
         self._status_label.setText(
             f"{label}: {voice} → {Path(output_path).name}  "
@@ -2269,6 +2385,9 @@ class KokoroStudioMain(QMainWindow):
         self._format_combo.setEnabled(False)
         self._pron_edit_btn.setEnabled(False)
         self._pron_checkbox.setEnabled(False)
+        # Streaming toggle stays reachable so a power user can switch
+        # mid-run; its state is informational because the sink is
+        # already provisioned (the slot is documented below).
         self._output_edit.setReadOnly(True)
 
         self._worker = SynthesisWorker(
@@ -2281,6 +2400,11 @@ class KokoroStudioMain(QMainWindow):
             parent=self,
         )
         self._worker.progress.connect(self._on_synthesis_progress)
+        # Streaming playback routing: the worker's `chunk_ready` signal
+        # carries the raw float32 numpy chunk; we forward it to the
+        # PcmRingBuffer (if streaming is on). The slot is a no-op when
+        # streaming is disabled — we disconnect/connect per run below.
+        self._worker.chunk_ready.connect(self._on_streaming_chunk)
         # Capture auto_play in a lambda closure (default arg avoids late-binding).
         self._worker.finished_ok.connect(
             lambda path, dur, audio, ap=auto_play:
@@ -2322,17 +2446,57 @@ class KokoroStudioMain(QMainWindow):
         self._progress.setValue(1)
         self._progress.setVisible(False)
         if auto_play:
-            self._player.stop()
-            self._player.setSource(QUrl.fromLocalFile(path))
-            self._player.play()
+            # Decide between streaming-drain vs. QMediaPlayer fallback
+            # using PortAudio's own `active` flag. This is more
+            # reliable than the synchronous QAudioSink.error() poll
+            # we tried in v1 (which Qt6 sets asynchronously):
+            # `active` flips False the instant the callback raises
+            # `sd.CallbackStop`, i.e. on natural EOS drain OR a
+            # sounddevice-side failure. `getattr(..., False)`
+            # handles the case where sounddevice was never imported
+            # (`_sd_stream` is None in that case, so we fall through
+            # cleanly to the proven file-based path).
+            sd_active = bool(getattr(self._sd_stream, "active", False))
+            streaming_ok = self._ring_buffer is not None and sd_active
+            if streaming_ok:
+                # Streaming path: don't kick QMediaPlayer — two
+                # simultaneous output devices would clash on the audio
+                # hardware. Mark EOS on the ring buffer and let
+                # QAudioSink drain naturally into IdleState, then
+                # _on_streaming_sink_state() does the cleanup. The
+                # saved file is in `self._last_audio_path` and the
+                # user can re-play it after playback finishes.
+                self._ring_buffer.mark_eos()
+            else:
+                # File-based fallback. Covers three cases:
+                #  1. streaming was never enabled (legacy path);
+                #  2. streaming WAS enabled but the sink errored
+                #     (Windows format-negotiation failure, locked
+                #     device, backend refused the format, etc.);
+                #  3. odd safety-net state (ring buffer present but
+                #     sink is None — should not normally happen).
+                self._stop_streaming_sink()
+                self._player.stop()
+                self._player.setSource(QUrl.fromLocalFile(path))
+                self._player.play()
 
     def _on_synthesis_failed(self, error_msg: str) -> None:
         self._status_label.setText("Failed.")
         self._progress.setVisible(False)
+        # CRITICAL: tear the streaming sink down here too — the engine
+        # raised BEFORE mark_eos was called, so the sink would keep
+        # playing silence indefinitely otherwise. Reset clears any
+        # in-flight chunks that survived the failure.
+        self._stop_streaming_sink()
         QMessageBox.critical(self, "Synthesis failed", error_msg)
 
     def _on_synthesis_thread_finished(self) -> None:
-        # Disengage worker; restore UI to idle state.
+        # Disengage worker; restore UI to idle state. NOTE: the streaming
+        # sink (if any) is intentionally NOT torn down here — it may
+        # still be draining its buffer. Cleanup happens in
+        # _on_streaming_sink_state when QAudioSink transitions to
+        # IdleState after EOS. Worst case (e.g. close event during
+        # drain), closeEvent() forces a hard stop.
         self._worker = None
         self._progress.setRange(0, 0)
         self._editor.setReadOnly(False)
@@ -2345,9 +2509,233 @@ class KokoroStudioMain(QMainWindow):
     def _on_play_clicked(self) -> None:
         if not self._last_audio_path:
             return
+        # If the user clicks "Play last" while a streaming sink is
+        # still active (rare race window between finished_ok and the
+        # IdleState transition), stop the sink first so we don't have
+        # both devices talking at once.
+        self._stop_streaming_sink()
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(self._last_audio_path))
         self._player.play()
+
+    # ================================================== Streaming playback
+    def _start_streaming_sink(self) -> None:
+        """Provision sounddevice.OutputStream for streaming playback.
+
+        Why sounddevice instead of QAudioSink:
+          * PySide6's QAudioSink was silently no-op'ing on the
+            user's Windows audio endpoint despite v1's Int16 PCM
+            negotiation (file save works, Listen-to-last works,
+            but real-time streaming was silent). Without
+            diagnostics on the user's hardware we cannot pinpoint
+            the root cause; sounddevice bypasses the entire
+            QtMultimedia streaming stack on the assumption that
+            PortAudio (via WASAPI on Windows) is more reliable.
+          * sounddevice accepts float32 PCM directly, so we drop
+            the v1 Int16 downconversion and keep Kokoro's
+            full-range output untouched.
+          * PortAudio owns its C audio thread; we get gapless
+            playback without the QAudioSink GC / stateChanged
+            races we kept tripping over.
+
+        Failure modes (all silenced, fall back to file-based):
+          - streaming checkbox is unchecked;
+          - the platform reports no audio output device;
+          - sounddevice isn't importable (lazy import).
+
+        Health-check used by `_on_synthesis_done`:
+          `self._sd_stream.active` (PortAudio's flag flips False
+          the moment the callback raises `sd.CallbackStop`, i.e.
+          on natural EOS drain via the empty-buffer + eos branch).
+        """
+        if not (self._stream_checkbox.isChecked() and self._stream_available):
+            return
+        # `sd` is bound at module scope via the lazy import near
+        # the top of this file (mirrors the PySide6 pattern).
+        # `_HAS_SOUNDDEVICE` is False when sounddevice isn't
+        # installed (rare; sounddevice is in requirements.txt).
+        if not _HAS_SOUNDDEVICE:
+            return
+        # Defensive: a previous run leaked a stream (close-event
+        # path skipped). Drop it first so we don't end up with
+        # two PortAudio streams competing.
+        if self._sd_stream is not None:
+            self._stop_streaming_sink()
+        self._ring_buffer = PcmRingBuffer()
+        # Cache the user-chosen volume so the PortAudio callback
+        # never has to read self._audio_out (a Qt object) on its
+        # background thread. The volume is locked for the
+        # synthesis run; mid-run volume changes are a future
+        # feature (would need a Qt-signal-driven refresh here).
+        self._stream_volume = float(self._audio_out.volume())
+        try:
+            self._sd_stream = sd.OutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype='float32',
+                # ~46 ms per callback at 24 kHz mono is a good
+                # latency/safety trade-off: small enough to react
+                # quickly to per-chunk arrivals, large enough that
+                # transient producer jitter won't underrun.
+                blocksize=1024,
+                callback=self._sd_stream_callback,
+            )
+            self._sd_stream.start()
+        except Exception:
+            # sd.OutputStream ctor / start can fail if the host's
+            # default device is busy or pulled. Reset state so
+            # `_on_synthesis_done`'s fallback to QMediaPlayer
+            # kicks in cleanly.
+            self._sd_stream = None
+            self._ring_buffer = None
+            return
+
+    def _sd_stream_callback(self, outdata, frames, time_info, status) -> None:
+        """PortAudio callback that drains PcmRingBuffer.
+
+        Runs on PortAudio's background thread (NOT the GUI thread).
+        Must be fast, exception-safe, and self-contained: any
+        exception here can hang the OS audio subsystem, so we
+        propagate only `sd.CallbackStop` and swallow everything
+        else. We deliberately do not touch Qt widgets from here
+        (PySide6 widgets are not thread-safe); instead a
+        print-to-stderr breadcrumb is emitted for diagnostic
+        underruns (see below).
+
+        Underrun contract:
+          - buffer empty + EOS NOT set: silent (PortAudio will
+            call us again as soon as the producer pushes more);
+          - buffer empty + EOS SET: raise sd.CallbackStop so
+            `_sd_stream.active` flips False (read by
+            `_on_synthesis_done`'s fallback decision).
+        """
+        try:
+            if status:
+                # PortAudio surfaces underflow / overflow via the
+                # status struct. Print to stderr as a breadcrumb
+                # for the user debugging audio issues from
+                # console output alone. We deliberately do NOT
+                # call self._status_label.setText here: PySide6
+                # widgets are not thread-safe from a PortAudio
+                # callback and a UI access violation here can
+                # hang the OS audio subsystem.
+                try:
+                    print(f"[Kokoro] audio underrun/overflow: {status}", file=sys.stderr)
+                except Exception:
+                    pass
+            # `frames` = number of samples PortAudio requested
+            # this call. Float32 mono = 4 bytes per sample.
+            num_bytes = frames * 4
+            chunk = (
+                self._ring_buffer.pop(num_bytes)
+                if self._ring_buffer is not None
+                else b""
+            )
+            if not chunk:
+                if self._ring_buffer is not None and self._ring_buffer.is_eos():
+                    raise sd.CallbackStop
+                outdata.fill(0)
+                return
+            # Apply the same volume knob the file-based path uses.
+            # sounddevice has no .setVolume() so we scale the
+            # float32 samples in-place. self._audio_out.volume()
+            # is a pure accessor (no Qt work) -> safe from
+            # callback thread.
+            arr = np.frombuffer(chunk, dtype=np.float32) * self._stream_volume
+            n = min(len(arr), frames)
+            outdata[:n, 0] = arr[:n]
+            if n < frames:
+                # Partial pull - pad remainder with silence. Can
+                # happen at EOS or just before the next chunk
+                # arrives.
+                outdata[n:, 0] = 0
+        except sd.CallbackStop:
+            raise
+        except Exception:
+            # Catastrophic failure inside the audio thread:
+            # silence and keep going. Never crash PortAudio from
+            # a callback.
+            try:
+                outdata.fill(0)
+            except Exception:
+                pass
+
+    def _on_streaming_chunk(self, _idx: int, chunk: np.ndarray) -> None:
+        """Route an incoming Kokoro chunk into the streaming ring buffer.
+
+        Slot fires on the GUI thread (Qt signal-slot connection delivers
+        cross-thread safely by default). The push itself is also
+        thread-safe, so even if a future change re-routes this through
+        a direct call, no race is introduced.
+        """
+        if self._ring_buffer is None:
+            return
+        # Push Kokoro's raw float32 bytes straight into the ring
+        # buffer. sounddevice (PortAudio) consumes float32 PCM
+        # natively on every supported backend (WASAPI / CoreAudio /
+        # PulseAudio / PipeWire), so we keep full dynamic range and
+        # drop the v1 Int16 downconversion path entirely.
+        # `np.asarray` is defensive against mis-typed callers; the
+        # `.tobytes()` representation is little-endian IEEE-754 on
+        # x86/ARM, which is exactly what sounddevice reads.
+        pcm = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        self._ring_buffer.push(pcm.tobytes())
+
+    def _on_streaming_sink_state(self, state) -> None:
+        """Legacy QAudioSink stateChanged hook - now a no-op shim.
+
+        Kept as an empty method (rather than deleted) so any stray
+        connect call or external reference doesn't crash.
+        sounddevice doesn't fire Qt-style stateChanged signals;
+        cleanup after a streaming run is handled by
+        `_stop_streaming_sink` on the GUI thread instead.
+        """
+        return
+
+
+    def _stop_streaming_sink(self) -> None:
+        """Hard-stop the sounddevice stream (drops in-flight audio).
+
+        Used by the Stop button (Stop -> worker interrupt) and by
+        `closeEvent` (window shutdown during a streaming run).
+        sounddevice's `stop()` aborts the PortAudio stream without
+        draining; `close()` releases the underlying WASAPI handle.
+        We reset the ring buffer so stale audio does not bleed
+        into a subsequent run.
+        """
+        if self._sd_stream is not None:
+            try:
+                self._sd_stream.stop()
+            except Exception:
+                pass
+            try:
+                self._sd_stream.close()
+            except Exception:
+                pass
+            self._sd_stream = None
+        if self._ring_buffer is not None:
+            self._ring_buffer.reset()
+
+    def _on_stream_toggle(self, checked: bool) -> None:
+        """Echo the new streaming toggle state in the status bar.
+
+        The checkbox is informational from the next synthesis
+        forward (provisioning happens at `_start_synthesis` time, not
+        here), so we just confirm the choice with a status-bar note
+        matching the pattern used for the Pronunciation toggle.
+        """
+        if not self._stream_available:
+            self._status_label.setText(
+                "Streaming unavailable on this system "
+                "(no audio output device).  "
+                "Falling back to file-based playback."
+            )
+            return
+        state = "ON" if checked else "OFF"
+        mode = "real-time streaming" if checked else "play-after-synthesis"
+        self._status_label.setText(
+            f"Streaming playback: {state}  ·  next run will use {mode}"
+        )
 
     def _on_stop_audio_clicked(self) -> None:
         self._player.stop()
@@ -2406,6 +2794,10 @@ class KokoroStudioMain(QMainWindow):
         # above remains the authoritative state during a run.
         self._pron_edit_btn.setEnabled(not running)
         self._pron_checkbox.setEnabled(not running)
+        # Streaming checkbox stays reachable during synthesis
+        # (changing it mid-run only affects the NEXT run), but
+        # greys out when the platform has no audio output device.
+        self._stream_checkbox.setEnabled(self._stream_available)
         # Mirror button enable state to the QAction shortcuts so keyboard
         # users get the same greyed-out affordances as mouse users. We
         # don't touch Undo/Redo here — those are driven by
@@ -2442,6 +2834,10 @@ class KokoroStudioMain(QMainWindow):
                 )
                 self._worker.terminate()
                 self._worker.wait(1000)
+        # Hard-stop the streaming sink before tearing down the window.
+        # Qt audio thread may be mid-readData() right now; stop() first
+        # so it gets a clean shutdown signal before refs go away.
+        self._stop_streaming_sink()
         try:
             self._player.stop()
         except Exception:

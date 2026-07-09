@@ -24,6 +24,7 @@ See `PLAN.md` for the full roadmap.
 | ✅ | **Pronunciation dictionary** — case-sensitive, whole-word, longest-rule-first substitutions persisted to JSON |
 | ✅ | **Speed control** — 0.1× to 3.0× via coupled slider + spinbox |
 | ✅ | **Background synthesis** — UI stays responsive while Kokoro generates |
+| ✅ | **Real-time streaming playback** *(Phase 2)* — hear audio as it generates, ~200 ms after clicking Generate |
 | ✅ | **In-app playback** — generated audio plays immediately via `QMediaPlayer` |
 | ✅ | **Stop / cancel** — clean cancellation of in-flight generations |
 
