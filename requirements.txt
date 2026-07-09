@@ -1,0 +1,13 @@
+# Direct runtime dependencies for Kokoro Studio.
+# Pinned to a tested floor; the engine is forward-compatible with newer
+# versions of these packages. See pyproject.toml for the authoritative
+# version constraints (used by `pip install -e .`).
+PySide6>=6.5
+kokoro>=0.9
+soundfile>=0.12
+numpy>=1.24
+lameenc>=1.8
+pypdf>=4.0
+ebooklib>=0.18
+beautifulsoup4>=4.12
+lxml>=4.9

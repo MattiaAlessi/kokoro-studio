@@ -1,0 +1,131 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dll
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+*.manifest
+*.spec
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.coveragerc
+coverage.xml
+*.cover
+.hypothesis/
+tests/.pytest_cache/
+
+# Translations / IDE / editor
+*.mo
+*.pot
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Project-specific
+OLD/
+*.tmp
+*.bak
+*.swp
+
+# Generated artefacts
+docs/_build/
+site/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# Secrets and keys
+*.pem
+*.key
+secrets.yaml
+
+# OS-specific
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs_vista.db
+[Bb]in
+[Ii]pch
+
+# Logs
+*.log
+logs/
+
+# Runtime / test artefacts
+*.pid
+*.seed
+*.pid.lock
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+*.egg
+.eggs/
+
+# MyPy / type-checking
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+profile_default/
+
+# PyInstaller
+*.spec
+!pymunk/options.py
+
+# Lambda / serverless
+.serverless/
+.terraform/
+.env.lambda
+
+# Build cache
+.ruff_cache/
+.flake8
+
+# Kokoro Studio local-only artefacts
+# (kept above for users who want to keep generated audio in their
+# working directory; remove this section if you prefer committing them)
+# audio_samples/
+# output/

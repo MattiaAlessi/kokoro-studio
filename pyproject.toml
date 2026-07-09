@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kokoro-studio"
+version = "0.1.0"
+description = "Local, free, fast, private neural text-to-speech — PySide6 desktop GUI for Kokoro-82M"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = [
+    "tts",
+    "text-to-speech",
+    "kokoro",
+    "pyside6",
+    "desktop",
+    "offline",
+    "local",
+    "audio",
+    "audiobook",
+    "voice",
+]
+authors = [
+    { name = "Matti" },
+]
+maintainers = [
+    { name = "Matti" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Text Processing :: Markup",
+]
+
+dependencies = [
+    "PySide6>=6.5",
+    "kokoro>=0.9",
+    "soundfile>=0.12",
+    "numpy>=1.24",
+    "lameenc>=1.8",
+    "pypdf>=4.0",
+    "ebooklib>=0.18",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "mypy>=1.5",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+kokoro-studio = "kokoro_studio.__main__:main"
+
+[project.urls]
+"Source" = "https://github.com/MattiaAlessi/kokoro-studio"
+"Issues" = "https://github.com/MattiaAlessi/kokoro-studio/issues"
+"Donate"  = "https://github.com/MattiaAlessi/kokoro-studio/blob/main/DONATIONS.md"
+
+[tool.setuptools]
+packages = ["kokoro_studio", "tests"]
+
+[tool.setuptools.package-data]
+kokoro_studio = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "smoke: smoke tests that don't require the full TTS pipeline",
+    "slow: tests that download the Kokoro model or generate audio",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["OLD", "build", "dist", ".venv", "venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line-too-long (let ruff format, but allow long lines)
+    "B008",  # function-call-in-default-argument (PySide6 patterns)
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true

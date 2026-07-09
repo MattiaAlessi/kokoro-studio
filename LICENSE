@@ -1,0 +1,92 @@
+Kokoro Studio Source-Available License
+Version 1.0 — 2026
+
+Copyright (c) 2026 Matti. All rights reserved.
+
+The Licensor (the copyright holder named above) grants you the rights
+described below on the following conditions.
+
+────────────────────────────────────────────────────────────────────────
+1. PERMITTED USES
+────────────────────────────────────────────────────────────────────────
+
+You may:
+
+  a) Use the Software for personal, educational, research, and commercial
+     purposes, including bundling it with other paid software or offering
+     it as a paid product or service.
+
+  b) Copy, modify, and redistribute the Software, in whole or in part, in
+     source and/or binary form, provided that all the conditions in
+     Section 2 are met.
+
+  c) Submit contributions back to the original repository at the address
+     listed in the project README. Submitted contributions are accepted
+     under the same license.
+
+────────────────────────────────────────────────────────────────────────
+2. CONDITIONS
+────────────────────────────────────────────────────────────────────────
+
+  a) ATTRIBUTION. Any copy, modification, or redistribution of the
+     Software, in whole or in part, must retain and prominently display:
+
+       - This LICENSE file (or a clearly equivalent license declaration).
+       - The copyright notice in Section 0.
+       - The donation information documented in DONATIONS.md (or in any
+         notice embedded in the source).
+
+  b) MODIFICATION NOTICE. If you modify and redistribute the Software, you
+     must include a clearly visible note in the documentation, README, or
+     in the application's "About" / "Credits" dialog stating that you
+     have modified it, together with a brief description of what was
+     changed and the date of the change.
+
+  c) PRESERVATION OF DONATION INFORMATION. The donation information
+     described in DONATIONS.md must remain in the source, in the README,
+     and in any user-facing "About" dialog of any redistributed build.
+     You may add your own donation links alongside, but you may not
+     remove or obscure the originals.
+
+  d) RESERVATION OF RIGHTS. All rights not expressly granted in this
+     License are reserved by the Licensor. In particular, the Licensor
+     retains the exclusive right to:
+
+       - Sell the Software (or any derivative of it) commercially,
+         including via the original repository and any other channel.
+       - Solicit and accept donations, sponsorships, and paid support
+         contracts for the Software.
+       - Enforce this License against any violation, including by
+         seeking an injunction or damages.
+
+  e) NO TRADEMARK LICENSE. This License does not grant you any right to
+     use the Licensor's name, logos, or product names for endorsement
+     or promotion of derivative works without prior written permission.
+
+────────────────────────────────────────────────────────────────────────
+3. NO WARRANTY
+────────────────────────────────────────────────────────────────────────
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────
+4. TERMINATION
+────────────────────────────────────────────────────────────────────────
+
+Any violation of the Conditions in Section 2 automatically terminates
+your rights under this License. Rights may be reinstated at the
+Licensor's sole discretion upon written request.
+
+────────────────────────────────────────────────────────────────────────
+5. DONATIONS
+────────────────────────────────────────────────────────────────────────
+
+Donations to the Licensor are appreciated and help sustain the project.
+See the DONATIONS.md file in the project root for the currently
+published donation channels (PayPal, GitHub Sponsors, etc.).
