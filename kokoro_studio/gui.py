@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -355,8 +356,14 @@ class SynthesisWorker(QThread):
     """Runs `generate_speech()` off the GUI thread.
 
     Signals (consumed on the GUI thread):
-        progress(int  chunks_done, int  chunks_visible, float cumulative_seconds)
-            Emitted after every chunk Kokoro produces.
+        progress(int  chunks_done, int  chunks_visible, float cumulative_seconds, float eta_seconds)
+            Emitted after every chunk Kokoro produces. `cumulative_seconds`
+            is the wall-clock-independent running total of audio seconds
+            produced so far. `eta_seconds` is a best-effort estimate of
+            how much longer the synthesis will run; `-1` until we have
+            enough telemetry (≥0.5 s of synthesis + ≥2 chunks) to
+            extrapolate the realtime rate stably. Caller should treat the
+            estimate as a hint, not a contract.
         log(str)                    Any diagnostic line from the engine.
         finished_ok(str path, float duration_seconds, object audio_array)
             Final audio has been written to `path`.
@@ -366,9 +373,22 @@ class SynthesisWorker(QThread):
     `stop_check` raises *before* writing the output file.
     """
 
-    progress = Signal(int, int, float)
+    progress = Signal(int, int, float, float)
     finished_ok = Signal(str, float, object)
     failed = Signal(str)
+
+    # Empirical TTS speed used for ETA extrapolation when the engine
+    # hasn't revealed total chunks upfront (Kokoro chunks lazily through
+    # its SentencePiece tokenizer — we only know per-chunk counts
+    # after-the-fact). 13 chars/sec ≈ 150 wpm, the typical English
+    # narrator cadence. Tune `_EMPIRICAL_CHARS_PER_AUDIO_SEC` if your
+    # workflow is heavily non-English or unusually slow/fast.
+    _EMPIRICAL_CHARS_PER_AUDIO_SEC = 13.0
+    # Minimum telemetry before we emit a non-trivial ETA. The first
+    # chunk's wall-clock is dominated by Python startup overhead in the
+    # worker, so the rate estimate from `idx == 0` is wildly inflated.
+    _ETA_MIN_WARMUP_S = 0.5
+    _ETA_MIN_CHUNKS = 2
 
     def __init__(
         self,
@@ -396,6 +416,9 @@ class SynthesisWorker(QThread):
         self._stop_requested = False
         # Module-level on the worker so the chunk callback can mutate it.
         self._cumulative_samples = 0
+        # Wall-clock (monotonic) at the first chunk; reset to None
+        # between runs so a re-synthesis starts the ETA clock fresh.
+        self._synth_start_time: Optional[float] = None
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -407,9 +430,33 @@ class SynthesisWorker(QThread):
     def _on_chunk(self, idx: int, audio_chunk: np.ndarray) -> None:
         self._cumulative_samples += len(audio_chunk)
         cum_seconds = self._cumulative_samples / SAMPLE_RATE
-        # chunks_done = idx + 1; the engine doesn't know total upfront, so
-        # `chunks_visible` mirrors "n" — the progress bar stays indeterminate.
-        self.progress.emit(idx + 1, idx + 1, cum_seconds)
+
+        # Capture monotonic wall-clock at the first chunk so the ETA
+        # signal can extrapolate from `cumulative_audio / elapsed`
+        # once we have enough telemetry.
+        now = time.monotonic()
+        if self._synth_start_time is None:
+            self._synth_start_time = now
+        elapsed_wallclock = now - self._synth_start_time
+
+        # Best-effort ETA. Until we've seen 2 chunks AND at least half a
+        # second of wall-clock, the first-chunk latency dominates the
+        # rate estimate, so we emit `-1` (“no estimate yet”).
+        eta_seconds = -1.0
+        if (elapsed_wallclock >= self._ETA_MIN_WARMUP_S
+                and (idx + 1) >= self._ETA_MIN_CHUNKS):
+            rate = cum_seconds / elapsed_wallclock  # s_audio per s_wall
+            if rate > 0.0:
+                est_total_audio = (
+                    len(self._text) / self._EMPIRICAL_CHARS_PER_AUDIO_SEC
+                )
+                remaining_audio = max(0.0, est_total_audio - cum_seconds)
+                eta_seconds = remaining_audio / rate
+
+        # chunks_done = idx + 1; the engine doesn't know total upfront,
+        # so `chunks_visible` mirrors "n" — the progress bar stays
+        # indeterminate.
+        self.progress.emit(idx + 1, idx + 1, cum_seconds, eta_seconds)
 
     # ---- main entry ----------------------------------------------------
     def run(self) -> None:  # noqa: D401 — Qt calls this on .start()
@@ -2245,11 +2292,18 @@ class KokoroStudioMain(QMainWindow):
 
     def _on_synthesis_progress(self, chunks_done: int,
                                _chunks_visible: int,
-                               cumulative_seconds: float) -> None:
-        # Total chunks unknown upfront; show running counter in the status bar.
+                               cumulative_seconds: float,
+                               eta_seconds: float) -> None:
+        # Total chunks unknown upfront (the engine emits lazily through
+        # Kokoro's SentencePiece tokenizer). Show running counter + a
+        # best-effort ETA. `_format_duration` already does the right
+        # thing for "X.XX s" / "1m 30.50s" output; ETA `-1` = no signal.
+        eta_str = ""
+        if eta_seconds > 0.0:
+            eta_str = f"  ·  ~{_format_duration(eta_seconds)} remaining"
         self._status_label.setText(
             f"Generating  ·  chunk {chunks_done}  ·  "
-            f"{_format_duration(cumulative_seconds)} of audio so far"
+            f"{_format_duration(cumulative_seconds)} of audio so far{eta_str}"
         )
 
     def _on_synthesis_done(self, path: str, duration_s: float,

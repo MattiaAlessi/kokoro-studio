@@ -69,9 +69,12 @@
   - Dark QSS for the dialog is **scoped** (applied via `dialog.setStyleSheet(SETTINGS_QSS)`) so the rest of the app's main-window theme stays untouched
   - _Complexity: Low_
 
-- [ ] **Estimated Generation Time**
-  - Display "~X seconds remaining" based on text length and historical synthesis speed
-  - Show in the status bar during generation
+- [x] **Estimated Generation Time** ✅ *shipped*
+  - Status bar during synthesis now reads `Generating · chunk N · X.YYs of audio so far · ~Z remaining`
+  - The 4th arg of the `SynthesisWorker.progress` signal carries a best-effort ETA in wall-clock seconds; `-1.0` while we're still warming up
+  - ETA strategy: rate = `cumulative_audio_seconds / elapsed_wallclock` (calmed by a ≥0.5 s + ≥2 chunks warmup gate), then `remaining_audio / rate`, where `remaining_audio ≈ text_chars / _EMPIRICAL_CHARS_PER_AUDIO_SEC - cumulative_audio`
+  - `_EMPIRICAL_CHARS_PER_AUDIO_SEC = 13.0` matches ~150 wpm English narration; tune for non-English / atypical pacing without code edits
+  - Class-level constants `_ETA_MIN_WARMUP_S` and `_ETA_MIN_CHUNKS` gate noisy first-chunk rate estimates
   - _Complexity: Low_
 
 ### Research Tasks
@@ -414,11 +417,11 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 ## Current Status
 
-**Overall Progress:** 2 / 20 features completed
+**Overall Progress:** 3 / 20 features completed
 
-**Current Phase:** Phase 1 — Quick Wins
+**Current Phase:** Phase 1 — Quick Wins ✅ *complete*
 
-**Next Up:** Estimated Generation Time
+**Next Up:** Real-Time Streaming (Phase 2) — 🔥 HIGHEST PRIORITY
 
 ---
 
