@@ -195,3 +195,137 @@ def test_save_audio_rejects_bad_shape(engine):
         path = os.path.join(td, "test.wav")
         with pytest.raises(ValueError, match="1-D mono"):
             engine.save_audio(bad, path, output_format="wav")
+
+
+# ---------------------------------------------------------------------------
+# _prime_voice_into_pipeline (Phase 2 - Voice Blending lazy-load workaround)
+# ---------------------------------------------------------------------------
+#
+# Kokoro's KPipeline.voices dict is populated lazily on the first synthesis
+# call. Without these priming helpers, `compute_blend_tensor` would raise
+# "voice_a 'af_heart' is not loaded in the current pipeline" when the user
+# creates a blend using a voice that hasn't been synthesised yet. We mock
+# the pipeline here so these tests don't depend on the ~300 MB Kokoro
+# acoustic model being installed.
+
+from typing import Dict, Iterator, Tuple  # noqa: E402
+
+
+class _FakeKokoroPipe:
+    """Minimal stand-in for `kokoro.KPipeline` used by the prime tests.
+
+    Mirrors Kokoro's lazy-voice contract:
+      * `.voices` starts empty.
+      * Each successful call (`__call__(text='a', voice=X)`) adds `X`
+        to `.voices` (mirrors `KPipeline.load_voice`).
+      * Yields at least one chunk so the prime-helper's
+        `for _ in pipe(...): break` iterates without hanging.
+    """
+
+    def __init__(self, *, raise_on_call: bool = False) -> None:
+        self.voices: Dict[str, object] = {}
+        self._raise = raise_on_call
+        self.call_count = 0
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        voice: str,
+        **kwargs: object,
+    ) -> Iterator[Tuple[str, str, str]]:
+        self.call_count += 1
+        if self._raise:
+            raise RuntimeError(f"Fake pipeline error for voice {voice!r}")
+        if voice not in self.voices:
+            self.voices[voice] = object()  # stand-in tensor; tests only check presence
+        yield ("graphemes", "phonemes", "audio")
+
+
+class _NoVoicesPipe:
+    """Pipeline that doesn't expose `.voices` at all (defensive code path)."""
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        voice: str,
+        **kwargs: object,
+    ) -> Iterator[Tuple[str, str, str]]:
+        yield ("g", "p", "a")
+
+
+@pytest.fixture
+def fake_pipe(engine):
+    """Inject a clean FakeKokoroPipe for lang='a'; reset `_pipelines` after."""
+    saved = dict(engine._pipelines)
+    engine._pipelines.clear()
+    pipe = _FakeKokoroPipe()
+    engine._pipelines["a"] = pipe
+    try:
+        yield pipe
+    finally:
+        engine._pipelines.clear()
+        engine._pipelines.update(saved)
+
+
+def test_prime_voice_into_pipeline_no_op_when_already_loaded(engine, fake_pipe):
+    """Idempotent: an already-loaded voice short-circuits without synthesis."""
+    fake_pipe.voices["af_heart"] = "preloaded-tensor"
+    ok = engine._prime_voice_into_pipeline("a", "af_heart")
+    assert ok is True
+    assert fake_pipe.voices["af_heart"] == "preloaded-tensor"
+    assert fake_pipe.call_count == 0, "prime must not synthesise for loaded voices"
+
+
+def test_prime_voice_into_pipeline_lazy_loads_missing_voice(engine, fake_pipe):
+    """A voice NOT in `.voices` is materialised by a one-tick synthesis."""
+    assert "af_heart" not in fake_pipe.voices
+    ok = engine._prime_voice_into_pipeline("a", "af_heart")
+    assert ok is True
+    assert "af_heart" in fake_pipe.voices
+    assert fake_pipe.call_count == 1, "expected exactly one pipe() invocation"
+
+
+def test_prime_voice_into_pipeline_is_idempotent_across_calls(engine, fake_pipe):
+    """Two consecutive prime calls should only synthesise once total."""
+    engine._prime_voice_into_pipeline("a", "af_heart")
+    engine._prime_voice_into_pipeline("a", "af_heart")
+    assert fake_pipe.call_count == 1
+
+
+def test_prime_voice_into_pipeline_returns_false_on_synth_failure(engine):
+    """When pipe() raises (e.g. unknown voice), prime returns False cleanly
+    so the caller's downstream KeyError surfaces the precise reason."""
+    saved = dict(engine._pipelines)
+    engine._pipelines.clear()
+    pipe = _FakeKokoroPipe(raise_on_call=True)
+    engine._pipelines["a"] = pipe
+    try:
+        ok = engine._prime_voice_into_pipeline("a", "af_heart")
+        assert ok is False
+        assert pipe.call_count == 1
+    finally:
+        engine._pipelines.clear()
+        engine._pipelines.update(saved)
+
+
+def test_prime_voice_into_pipeline_returns_false_without_voices_attr(engine):
+    """Pipeline that doesn't expose `.voices` (defensive path) returns False
+    instead of crashing on the membership check."""
+    saved = dict(engine._pipelines)
+    engine._pipelines.clear()
+    engine._pipelines["a"] = _NoVoicesPipe()
+    try:
+        ok = engine._prime_voice_into_pipeline("a", "af_heart")
+        assert ok is False
+    finally:
+        engine._pipelines.clear()
+        engine._pipelines.update(saved)
+
+
+def test_prime_voice_into_pipeline_invalid_lang_raises(engine):
+    """Unknown `lang_code` propagates the canonical ValueError from
+    `_get_pipeline`, since we can't prime what we can't look up."""
+    with pytest.raises(ValueError, match="lang_code"):
+        engine._prime_voice_into_pipeline("zz", "af_heart")

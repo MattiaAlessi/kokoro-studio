@@ -206,11 +206,28 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
     resets only at the start of a fresh job, not at every speaker change
   _Complexity: Medium_
 
-- [ ] **Voice Blending / Mixing**
-  - Slider to blend two voices (e.g. 70% `af_bella` + 30% `af_sarah`)
-  - Uses StyleTTS 2 style vector linear interpolation
-  - Creates virtually infinite custom voices from 29 presets
-  - Save blends as reusable presets
+- [x] **Voice Blending / Mixing** 🎻 ✅ *shipped*
+  - New `kokoro_studio.blending` module: `VoiceBlend` frozen dataclass with
+    alpha bounds enforcement, versioned JSON persistence at
+    `<Documents>/KokoroStudio/voice_blends.json` (legacy flat schema
+    auto-migrates), `compute_blend_tensor` with rounded-alpha cache,
+    `resolve_voice_param`, `is_valid_blend_name` (shared regex with the
+    dialogue-marker tokens so blend names are accepted in `[my_blend]:` markers)
+  - Engine integration: `generate_speech(voice_blend=..., blends=...)` kwargs,
+    per-segment blend resolution in `_generate_dialogue_segments`, lazy
+    disk-load of `voice_blends.json` via `_ensure_blends_loaded`
+  - GUI: inline "CREATE BLEND" frame (Voice A / Voice B dropdowns + alpha
+    slider + spin + name + Save / Preview buttons), saved blends appear in
+    the voice list with a `BLEND` badge, voice readout renders blend
+    composition (`🎻 name · 70% af_bella + 30% af_sarah`), multi-speaker
+    dialogue parser widens `known_voices` with blend names
+  - `SynthesisWorker` snapshots `blends=` at construction time and passes
+    it to the engine on the worker thread
+  - Preview re-entrancy guard prevents Generate clicks from racing the
+    synchronous preview `generate_speech` call
+  - 61 unit tests in `tests/test_blending.py` cover dataclass validation,
+    schema migration, name validation, tensor caching, round-trip
+    save/load, and reserved-name collision
   - _Complexity: Medium-High_
 
 - [ ] **SSML-lite Controls**
@@ -462,10 +479,10 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 **Current Phase:** Phase 2 — Core TTS Advancements *(in progress)*
 
-**Just Shipped:** Multi-Speaker Dialogue Mode 🎭
+**Just Shipped:** Voice Blending / Mixing 🎛
 
-**Next Up:** Voice Blending / Mixing
+**Next Up:** SSML-lite Controls
 
 ---
 
-_Last updated: 2026-07-09_
+_Last updated: 2026-07-10_

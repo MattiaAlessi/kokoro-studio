@@ -445,6 +445,12 @@ class SynthesisWorker(QThread):
         pronunciation_rules: Optional[dict] = None,
         multi_speaker: bool = False,
         speaker_gap_s: float = 0.25,
+        # Phase 2 - Voice Blending. Snapshot of the GUI's
+        # `_loaded_blends` dict at click time, so the worker
+        # thread doesn't re-read disk between requests. Voice
+        # blends are frozen dataclasses, so a shallow dict copy
+        # is thread-safe.
+        blends: Optional[Mapping[str, "VoiceBlend"]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -466,6 +472,12 @@ class SynthesisWorker(QThread):
         # inserted between segments (default 0.25 s).
         self._multi_speaker = multi_speaker
         self._speaker_gap_s = speaker_gap_s
+        # Phase 2 - Voice Blending. Shallow snapshot copy so the
+        # worker doesn't share the GUI's dict reference (the user
+        # could open the dict editor while we're synthesising).
+        self._blends: Optional[dict] = (
+            dict(blends) if blends else None
+        )
         # Tracks the previous segment index in `_on_chunk` to detect
         # "speaker changed" transitions in the stream of chunks. The
         # engine emits multiple chunks per segment; we surface one
@@ -567,6 +579,10 @@ class SynthesisWorker(QThread):
                 speaker_gap_s=self._speaker_gap_s,
                 on_chunk=self._on_chunk,
                 stop_check=self._stop_check,
+                # Phase 2 - Voice Blending. Pass the snapshotted
+                # blend registry to the engine so it can resolve
+                # saved blend names to tensors per-segment.
+                blends=self._blends,
             )
             if self._stop_requested:
                 # Engine raised but we caught gracefully above; belt + braces.
@@ -1193,6 +1209,31 @@ class KokoroStudioMain(QMainWindow):
         # `_refresh_dialogue_chip` covers the pre-build window.
         self._dialogue_chip_row = None  # type: ignore[assignment]
         self._dialogue_help_btn = None  # type: ignore[assignment]
+
+        # Phase 2 - Voice Blending. Built in `_build_voice_panel`
+        # and wired in `_wire_signals`. Pre-declared here so any
+        # pre-build reads return None cleanly (parity with _dialogue_*).
+        self._blend_frame = None  # type: ignore[assignment]
+        self._blend_voice_a_combo = None  # type: ignore[assignment]
+        self._blend_voice_b_combo = None  # type: ignore[assignment]
+        self._blend_alpha_slider = None  # type: ignore[assignment]
+        self._blend_alpha_spin = None  # type: ignore[assignment]
+        self._blend_name_edit = None  # type: ignore[assignment]
+        self._blend_save_btn = None  # type: ignore[assignment]
+        self._blend_preview_btn = None  # type: ignore[assignment]
+        # Loaded blend presets dict, kept in sync with
+        # Documents/KokoroStudio/voice_blends.json.
+        self._loaded_blends: dict = {}
+        self._blend_dict_path = _default_output_dir() / "voice_blends.json"
+        # Suppresses the alpha_slider <-> alpha_spin feedback loop.
+        self._suppress_blend_alpha_sync = False
+        # Set by `_on_preview_blend_clicked` while a preview is
+        # synthesising on the GUI thread. The SynthesisWorker
+        # check (`_worker.isRunning()`) does NOT cover this case
+        # because the preview is synchronous `generate_speech` —
+        # a Generate click during preview would otherwise launch
+        # a second `pipeline(...)` on the same KPipeline.
+        self._preview_in_progress = False
         # Populated in `_on_generate_clicked` from `parse_dialogue`;
         # the SynthesisWorker reads it through the multi_speaker flag,
         # but the main window keeps a copy so `_on_segment_started`
@@ -1214,6 +1255,17 @@ class KokoroStudioMain(QMainWindow):
         self._repopulate_voice_list(None)
         self._refresh_output_path()
         self._load_pron_dict()
+        # Phase 2 - Voice Blending. Load blends so they're
+        # available to the FIRST `_repopulate_voice_list` call
+        # below; otherwise blends loaded from disk on first run
+        # would never render in the voice list (the panel was
+        # built before this hook ran).
+        self._load_blends()
+        # Rebuild the voice list now that the blend registry is
+        # populated; without this, saved blends stay invisible
+        # until the user saves a new one (which itself triggers
+        # a repopulate via `_save_blend`).
+        self._repopulate_voice_list(None)
         self._update_button_states()
 
     # ---------------------------------------------------------------- UI
@@ -1319,6 +1371,98 @@ class KokoroStudioMain(QMainWindow):
         self._preview_btn = QPushButton("▶  Preview selected voice")
         self._preview_btn.setProperty("role", "ghost")
         layout.addWidget(self._preview_btn)
+
+        # ---- BLEND EDITOR (Phase 2 - Voice Blending) --------
+        # Inline frame for creating / previewing custom voice
+        # blends. Voice A / Voice B dropdowns + alpha slider +
+        # name field + Save / Preview buttons. Saved blends
+        # appear in `_voice_list` (above) with a "BLEND" badge.
+        self._blend_frame = QFrame()
+        self._blend_frame.setObjectName("Panel")
+        bl = QVBoxLayout(self._blend_frame)
+        bl.setContentsMargins(0, 8, 0, 0)
+        bl.setSpacing(8)
+
+        bl_title = QLabel("🎛  CREATE BLEND")
+        bl_title.setObjectName("SectionTitle")
+        bl.addWidget(bl_title)
+
+        # Voice A + Voice B row
+        ab_row = QHBoxLayout()
+        ab_row.setSpacing(8)
+        self._blend_voice_a_combo = QComboBox()
+        self._blend_voice_b_combo = QComboBox()
+        for _v in list_voices():
+            self._blend_voice_a_combo.addItem(_v, _v)
+            self._blend_voice_b_combo.addItem(_v, _v)
+        # Sensible defaults: af_bella + af_sarah so dragging the
+        # alpha slider produces an obvious timbre shift out of
+        # the box.
+        self._blend_voice_a_combo.setCurrentText("af_bella")
+        self._blend_voice_b_combo.setCurrentText("af_sarah")
+        a_box = QVBoxLayout()
+        a_lbl = QLabel("A")
+        a_lbl.setObjectName("AddrLabel")
+        a_box.addWidget(a_lbl)
+        a_box.addWidget(self._blend_voice_a_combo)
+        b_box = QVBoxLayout()
+        b_lbl = QLabel("B")
+        b_lbl.setObjectName("AddrLabel")
+        b_box.addWidget(b_lbl)
+        b_box.addWidget(self._blend_voice_b_combo)
+        ab_row.addLayout(a_box, 1)
+        ab_row.addLayout(b_box, 1)
+        bl.addLayout(ab_row)
+
+        # Alpha slider + spinbox (kept aligned with the speed-control pattern).
+        alpha_row = QHBoxLayout()
+        alpha_row.setSpacing(8)
+        self._blend_alpha_slider = QSlider(Qt.Horizontal)
+        self._blend_alpha_slider.setRange(0, 100)  # 0..1 mapped below
+        self._blend_alpha_slider.setValue(50)
+        self._blend_alpha_spin = QDoubleSpinBox()
+        self._blend_alpha_spin.setDecimals(2)
+        self._blend_alpha_spin.setSingleStep(0.05)
+        self._blend_alpha_spin.setRange(0.0, 1.0)
+        self._blend_alpha_spin.setValue(0.50)
+        self._blend_alpha_spin.setMinimumWidth(72)
+        alpha_row.addWidget(self._blend_alpha_slider, 1)
+        alpha_row.addWidget(self._blend_alpha_spin)
+        bl.addLayout(alpha_row)
+
+        # Name field + Save button + Preview button
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        name_label = QLabel("Name:")
+        name_label.setObjectName("AddrLabel")
+        self._blend_name_edit = QLineEdit()
+        self._blend_name_edit.setPlaceholderText("my_custom_voice")
+        self._blend_name_edit.setToolTip(
+            "Identifier (a-z, 0-9, _) - saved as a reusable preset.\n"
+            "Tip: leave empty before clicking Save to auto-generate\n"
+            "  from the current Voice A + Voice B + alpha."
+        )
+        action_row.addWidget(name_label)
+        action_row.addWidget(self._blend_name_edit, 1)
+        self._blend_preview_btn = QPushButton("▶  Preview blend")
+        self._blend_preview_btn.setProperty("role", "ghost")
+        self._blend_preview_btn.setToolTip(
+            "Generate a short sample with the CURRENTLY-EDITED\n"
+            " blend (alpha / Voice A / Voice B), WITHOUT saving\n"
+            " - lets you hear a tweak before committing it."
+        )
+        action_row.addWidget(self._blend_preview_btn)
+        self._blend_save_btn = QPushButton("💾  Save blend")
+        self._blend_save_btn.setProperty("role", "primary")
+        action_row.addWidget(self._blend_save_btn)
+        bl.addLayout(action_row)
+
+        # Count label (mirrors the pronunciation "0 rules" pattern).
+        self._blend_count_label = QLabel("0 blends saved")
+        self._blend_count_label.setObjectName("Counter")
+        bl.addWidget(self._blend_count_label)
+
+        layout.addWidget(self._blend_frame)
 
         return panel
 
@@ -1630,6 +1774,42 @@ class KokoroStudioMain(QMainWindow):
         # Voice list (filter dropdown removed — only voice selection matters).
         self._voice_list.currentItemChanged.connect(self._on_voice_changed)
 
+
+        # Voice Blending (Phase 2). Alpha slider / spin sync MUST
+        # be guarded against valueChanged feedback loop (slider
+        # spinner triggers spin, spin triggers slider).
+        if self._blend_alpha_slider is not None:
+            self._blend_alpha_slider.valueChanged.connect(
+                self._on_alpha_slider_changed
+            )
+        if self._blend_alpha_spin is not None:
+            self._blend_alpha_spin.valueChanged.connect(
+                self._on_alpha_spin_changed
+            )
+        # Voice A / Voice B dropdown auto-update the placeholder
+        # for the Name field (only when empty).
+        if self._blend_voice_a_combo is not None:
+            self._blend_voice_a_combo.currentIndexChanged.connect(
+                self._on_blend_voice_selection_changed
+            )
+            self._blend_voice_b_combo.currentIndexChanged.connect(
+                self._on_blend_voice_selection_changed
+            )
+        # Save / Preview buttons + name-field editing-finished
+        # trigger the auto-name refresh on commit.
+        if self._blend_save_btn is not None:
+            self._blend_save_btn.clicked.connect(
+                self._on_save_blend_clicked
+            )
+        if self._blend_preview_btn is not None:
+            self._blend_preview_btn.clicked.connect(
+                self._on_preview_blend_clicked
+            )
+        if self._blend_name_edit is not None:
+            self._blend_name_edit.editingFinished.connect(
+                self._refresh_voice_readout
+            )
+
         # Speed (avoid feedback loops between spin and slider)
         self._speed_spin.valueChanged.connect(self._on_speed_spin_changed)
         self._speed_slider.valueChanged.connect(self._on_speed_slider_changed)
@@ -1898,6 +2078,51 @@ class KokoroStudioMain(QMainWindow):
             self._voice_list.addItem(item)
             self._voice_list.setItemWidget(item, label)
 
+        # Phase 2 - Voice Blending: append saved blends below
+        # the built-in voices. Each blend item carries the same
+        # UserRole payload (voice name = blend key) so the rest
+        # of the GUI treats them as first-class voices. We tag
+        # blend items with UserRole+1 and stash the composition
+        # dict at UserRole+2 so future code can distinguish
+        # them without parsing display text.
+        for blend_name, blend in self._loaded_blends.items():
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, blend_name)
+            item.setData(Qt.UserRole + 1, True)
+            item.setData(Qt.UserRole + 2, {
+                "voice_a": blend.voice_a,
+                "voice_b": blend.voice_b,
+                "alpha": blend.alpha,
+            })
+            pct_a = int(round(blend.alpha * 100))
+            pct_b = 100 - pct_a
+            rich = (
+                f"<div style='font-weight:600; font-size:13px;'>"
+                f"🎛 {blend_name}"
+                f" &nbsp;<span style='color:#9178FF; font-weight:600;"
+                f" font-size:10px; letter-spacing:1px;'>BLEND</span>"
+                f"</div>"
+                f"<div style='color:#9DA0A8; font-size:11px;'>"
+                f"{pct_a}% {blend.voice_a} + {pct_b}% {blend.voice_b}"
+                f"</div>"
+            )
+            label = QLabel()
+            label.setTextFormat(Qt.RichText)
+            label.setText(rich)
+            label.setWordWrap(True)
+            label.setContentsMargins(0, 0, 0, 0)
+            row_width = max(self._voice_list.viewport().width() - 24, 220)
+            label.setMinimumWidth(row_width)
+            item.setSizeHint(QSize(row_width, label.sizeHint().height() + 8))
+            label.setToolTip(
+                f"<b>{blend_name}</b> (custom blend)<br>"
+                f"A: {blend.voice_a} ({pct_a}%)<br>"
+                f"B: {blend.voice_b} ({pct_b}%)<br><br>"
+                f"Stored at: Documents/KokoroStudio/voice_blends.json"
+            )
+            self._voice_list.addItem(item)
+            self._voice_list.setItemWidget(item, label)
+
         # Try to keep the current voice selected; else pick the first available.
         keep_idx = -1
         for i in range(self._voice_list.count()):
@@ -1950,9 +2175,23 @@ class KokoroStudioMain(QMainWindow):
         if not detect_dialogue(text):
             row.setVisible(False)
             return
+        # Phase 2 - Voice Blending: blend names share the
+        # dialogue-marker regex with built-ins so we widen
+        # `known_voices` so user-defined blends don't trigger
+        # fallback warnings during the multi-speaker parse.
+        _known = set(VOICES.keys()) | set(self._loaded_blends.keys())
+        _fallback = self._current_voice or DEFAULT_VOICE
+        # Always fall back to a builtin so the per-segment
+        # KPipeline calls don't need to handle a blend-as-default
+        # edge case (blends are resolved lazily by the engine
+        # per-segment anyway, so a saved blend in `_current_voice`
+        # still works downstream via the tensor resolution path).
+        if _fallback not in VOICES and _fallback in self._loaded_blends:
+            _fallback = DEFAULT_VOICE
         segs, _ = parse_dialogue(
             text,
-            default_voice=self._current_voice or DEFAULT_VOICE,
+            default_voice=_fallback,
+            known_voices=_known,
         )
         summary = summarize_voices(segs)
         if summary:
@@ -2065,12 +2304,24 @@ class KokoroStudioMain(QMainWindow):
         of the default 'af_heart' to make the empty state obvious.
 """
         if not self._current_voice:
-            self._voice_readout.setText("\u2014")
+            self._voice_readout.setText("—")
+            return
+        # Phase 2 - Voice Blending: when the active voice is a
+        # saved blend we render its composition instead of the
+        # built-in grade metadata (the engine resolves the name
+        # to a tensor transparently during Generate).
+        if self._current_voice in self._loaded_blends:
+            _b = self._loaded_blends[self._current_voice]
+            _pct_a = int(round(_b.alpha * 100))
+            _pct_b = 100 - _pct_a
+            self._voice_readout.setText(
+                f"🎛 {self._current_voice}"
+                f"  ·  {_pct_a}% {_b.voice_a} + {_pct_b}% {_b.voice_b}"
+            )
             return
         info = get_voice_info(self._current_voice)
-            # (use the dashboard's selected voice + grade)
         self._voice_readout.setText(
-            f"{self._current_voice}  \u00b7  Grade {info['grade']}"
+            f"{self._current_voice}  ·  Grade {info['grade']}"
         )
 
     # ----- Voice list helpers (pre-existing) -----
@@ -2619,6 +2870,8 @@ class KokoroStudioMain(QMainWindow):
                 f" turn(s) \u00b7 {summarize_voices(self._current_segments)}"
             )
 
+        # Phase 2 - Voice Blending: snapshot the loaded blends
+        # so the worker thread doesn't re-read disk between clicks.
         self._start_synthesis(
             text=text,
             voice=self._current_voice or DEFAULT_VOICE,
@@ -2631,6 +2884,7 @@ class KokoroStudioMain(QMainWindow):
                 self._pron_rules if self._pron_checkbox.isChecked() else None
             ),
             multi_speaker=use_multi,
+            blends=dict(self._loaded_blends) if self._loaded_blends else None,
         )
 
     def _on_preview_clicked(self) -> None:
@@ -2683,6 +2937,10 @@ class KokoroStudioMain(QMainWindow):
         pronunciation_rules: Optional[dict] = None,
         multi_speaker: bool = False,
         speaker_gap_s: float = 0.25,
+        # Phase 2 - Voice Blending. Snapshotted blend registry
+        # forwarded to the SynthesisWorker; if None, the engine
+        # auto-loads from <Documents>/KokoroStudio/voice_blends.json.
+        blends: Optional[Mapping[str, "VoiceBlend"]] = None,
     ) -> None:
         if self._worker is not None and self._worker.isRunning():
             return  # already running; ignore
@@ -2724,6 +2982,10 @@ class KokoroStudioMain(QMainWindow):
             pronunciation_rules=pronunciation_rules,
             multi_speaker=multi_speaker,
             speaker_gap_s=speaker_gap_s,
+            # Phase 2 - Voice Blending. Forward the GUI's
+            # blend snapshot to the worker so saved blend
+            # names resolve to tensors at run time.
+            blends=blends,
         )
         self._worker.chunk_ready.connect(self._on_streaming_chunk)
         # Multi-speaker dialogue: fires once per voice transition
@@ -3134,6 +3396,225 @@ class KokoroStudioMain(QMainWindow):
             self._prev_act.setEnabled(bool(self._current_voice) and not running)
             self._save_act.setEnabled(text_ok and not running)
 
+    # === Voice Blending helpers (Phase 2) ===
+    def _load_blends(self) -> None:
+        """Read voice_blends.json into self._loaded_blends.
+
+        Mirrors `_load_pron_dict`. Silently recovers from a
+        missing or malformed file.
+        """
+        try:
+            from kokoro_studio.blending import load_blends as _ld
+            self._loaded_blends = _ld(self._blend_dict_path)
+        except ImportError:
+            self._loaded_blends = {}
+        self._refresh_blend_count_label()
+
+    def _save_blend(self, name: str, blend) -> bool:
+        """Persist a single blend to disk + memory.
+
+        Returns True on success. False on user-visible validation
+        failure (the slot surfaces a QMessageBox).
+        """
+        try:
+            from kokoro_studio.blending import (
+                save_blends as _sv, is_valid_blend_name as _vn,
+            )
+        except ImportError:
+            QMessageBox.warning(
+                self, "Voice blending unavailable",
+                "`blending.py` was not found. The blend was not saved.",
+            )
+            return False
+        if not _vn(name):
+            QMessageBox.warning(
+                self, "Invalid blend name",
+                "Blend names must match `[A-Za-z_][A-Za-z0-9_]*`.\n"
+                f"You provided: {name!r}",
+            )
+            return False
+        if name in VOICES:
+            QMessageBox.warning(
+                self, "Name reserved",
+                f"{name!r} is the name of a built-in voice.\n"
+                "Choose a different name (built-ins are immutable).",
+            )
+            return False
+        _new_dict = dict(self._loaded_blends)
+        if name in _new_dict:
+            _ans = QMessageBox.question(
+                self, "Overwrite blend?",
+                f"A blend named {name!r} already exists.\n\n"
+                "Replace it with the current panel settings?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if _ans != QMessageBox.Yes:
+                return False
+        _new_dict[name] = blend
+        try:
+            _sv(self._blend_dict_path, _new_dict, reserved_names=VOICES)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Could not save blend",
+                f"{type(e).__name__}: {e}\n\nPath: {self._blend_dict_path}",
+            )
+            return False
+        self._loaded_blends = _new_dict
+        self._refresh_blend_count_label()
+        self._repopulate_voice_list(None)
+        # Auto-select the just-saved blend so the output filename
+        # and readout reflect it immediately (no extra click).
+        for _i in range(self._voice_list.count()):
+            if self._voice_list.item(_i).data(Qt.UserRole) == name:
+                self._voice_list.setCurrentRow(_i)
+                break
+        return True
+
+    def _refresh_blend_count_label(self) -> None:
+        _n = len(self._loaded_blends)
+        _sfx = "" if _n == 1 else "s"
+        _lbl = getattr(self, "_blend_count_label", None)
+        if _lbl is not None:
+            _lbl.setText(f"{_n} blend{_sfx} saved")
+
+    def _default_blend_name(self) -> str:
+        """Auto-generate a blend name from the panel state.
+
+        e.g. af_bella + af_sarah, alpha 0.7 -> "bella_sarah_70".
+        """
+        _va = (
+            self._blend_voice_a_combo.currentText()
+            if self._blend_voice_a_combo else "af_heart"
+        )
+        _vb = (
+            self._blend_voice_b_combo.currentText()
+            if self._blend_voice_b_combo else "af_heart"
+        )
+        _alpha = (
+            self._blend_alpha_spin.value()
+            if self._blend_alpha_spin else 0.5
+        )
+        _short_a = _va.split("_", 1)[1] if "_" in _va else _va
+        _short_b = _vb.split("_", 1)[1] if "_" in _vb else _vb
+        if _short_a == _short_b:
+            return f"{_short_a}_shift{int(round(_alpha*100))}"
+        return f"{_short_a}_{_short_b}_{int(round(_alpha*100))}"
+
+    def _on_alpha_slider_changed(self, v: int) -> None:
+        if self._suppress_blend_alpha_sync or self._blend_alpha_spin is None:
+            return
+        self._suppress_blend_alpha_sync = True
+        try:
+            self._blend_alpha_spin.setValue(v / 100.0)
+        finally:
+            self._suppress_blend_alpha_sync = False
+
+    def _on_alpha_spin_changed(self, v: float) -> None:
+        if self._suppress_blend_alpha_sync or self._blend_alpha_slider is None:
+            return
+        self._suppress_blend_alpha_sync = True
+        try:
+            # setSliderPosition avoids the loop-back emit.
+            self._blend_alpha_slider.setSliderPosition(int(round(v * 100)))
+        finally:
+            self._suppress_blend_alpha_sync = False
+
+    def _on_blend_voice_selection_changed(self, _idx: int) -> None:
+        """If the Name field is empty, pre-fill the auto-generated
+        name from the new voice pair + alpha so users see a useful
+        placeholder as they fiddle with the dropdowns.
+        """
+        if (self._blend_name_edit is not None
+                and not self._blend_name_edit.text().strip()):
+            self._blend_name_edit.setPlaceholderText(self._default_blend_name())
+
+    def _on_save_blend_clicked(self) -> None:
+        from kokoro_studio.blending import VoiceBlend
+        _name = (self._blend_name_edit.text().strip()
+                 if self._blend_name_edit else "")
+        if not _name:
+            _name = self._default_blend_name()
+        _va = (self._blend_voice_a_combo.currentText()
+               if self._blend_voice_a_combo else "af_bella")
+        _vb = (self._blend_voice_b_combo.currentText()
+               if self._blend_voice_b_combo else "af_sarah")
+        _alpha = round(self._blend_alpha_spin.value(), 4) \
+            if self._blend_alpha_spin is not None else 0.5
+        try:
+            _blend = VoiceBlend(voice_a=_va, voice_b=_vb, alpha=_alpha)
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid blend", str(e))
+            return
+        if self._save_blend(_name, _blend):
+            self._status_label.setText(
+                f"Saved blend {_name!r}  ·  "
+                f"{int(round(_alpha*100))}% {_va} + "
+                f"{int(round((1.0-_alpha)*100))}% {_vb}"
+            )
+
+    def _on_preview_blend_clicked(self) -> None:
+        """Ad-hoc preview of the panel's CURRENTLY-EDITED blend.
+
+        Uses `voice_blend=(a, b, alpha)` so the user can hear a
+        tweak before saving it as a preset. Synthesis runs on
+        the GUI thread (short phrase, ~1-2 s); a re-entrancy
+        flag prevents a Generate click from racing against the
+        synchronous `generate_speech` call.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(
+                self, "Busy",
+                "A generation is already running. Stop it first "
+                "to preview a new blend.",
+            )
+            return
+        if self._preview_in_progress:
+            return  # silently drop the second click
+        from kokoro_studio.blending import VoiceBlend
+        _va = (self._blend_voice_a_combo.currentText()
+               if self._blend_voice_a_combo else "af_bella")
+        _vb = (self._blend_voice_b_combo.currentText()
+               if self._blend_voice_b_combo else "af_sarah")
+        _alpha = round(self._blend_alpha_spin.value(), 4) \
+            if self._blend_alpha_spin is not None else 0.5
+        try:
+            _blend = VoiceBlend(voice_a=_va, voice_b=_vb, alpha=_alpha)
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid blend", str(e))
+            return
+        _phrase = (
+            "Hello! This is a quick preview of my voice as a blend."
+        )
+        _out_path = _default_output_path(
+            f"blend_{int(round(_alpha*100))}_{_va}_{_vb}", "wav",
+        )
+        self._preview_in_progress = True
+        try:
+            _audio = generate_speech(
+                text=_phrase, voice_blend=_blend,
+                output_path=_out_path, speed=1.0,
+            )
+        except Exception as e:
+            self._preview_in_progress = False
+            QMessageBox.critical(
+                self, "Blend preview failed",
+                f"{type(e).__name__}: {e}",
+            )
+            return
+        finally:
+            self._preview_in_progress = False
+        self._last_audio_path = _out_path
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(_out_path))
+        self._player.play()
+        self._play_btn.setEnabled(True)
+        self._status_label.setText(
+            f"Blend preview  ·  {int(round(_alpha*100))}% {_va} + "
+            f"{int(round((1.0-_alpha)*100))}% {_vb}  ·  "
+            f"{len(_audio)/SAMPLE_RATE:.2f}s"
+        )
+
     # ------------------------------------------------------- Window close
     def closeEvent(self, event) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -3189,6 +3670,7 @@ def main() -> int:
     app.setOrganizationName("Kokoro Studio")
     app.setStyle("Fusion")
     app.setStyleSheet(QSS)
+
 
     window = KokoroStudioMain()
     window.show()
