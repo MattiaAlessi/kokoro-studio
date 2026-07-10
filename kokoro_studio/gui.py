@@ -380,6 +380,48 @@ def _format_bytes(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
 
 
+# SSML-lite Help dialog content (Phase 2). Bound here
+# rather than imported from kokoro_studio.ssml so the
+# GUI keeps a single source of truth for user-facing
+# documentation. Rendered cheaply on each click.
+SSML_HELP_SAMPLE = """\
+SSML-lite controls (Phase 2)
+
+Type the literal markup into the editor. Markers
+expand once the "Apply SSML" checkbox on the controls
+panel is ON.
+
+  <break time="1.5s"/>          Insert a 1.5-second silence.
+  <break time="500ms"/>          Millisecond precision is accepted.
+
+  <emphasis>word</emphasis>      Slows down the wrapped word
+                                (effective rate: 0.85x of
+                                base speed).
+
+  <prosody rate="fast">...</prosody>
+                                Speeds up the wrapped phrase.
+  <prosody rate="0.8">...</prosody>
+                                Numeric multipliers also work
+                                (0.8 = 80% of base speed).
+
+  Valid rate tokens:     x-slow (0.6), slow (0.8),
+                         medium (1.0), fast (1.4),
+                         x-fast (1.8).
+  Numeric rate range:    0.5 .. 2.0  (clipped to safe band).
+
+Notes:
+
+  * SSML-lite and multi-speaker dialogue are mutually
+    exclusive. When dialogue mode is on, SSML is silently
+    ignored -- the chip turns amber to warn you.
+  * The chip above the Generate button shows a
+    one-line summary ("1 break + 2 emphasis + 1 prosody")
+    that updates as you type.
+  * Plain text without markers works as usual; toggling
+    the checkbox on by accident has zero side-effects.
+"""
+
+
 # ===========================================================================
 # Background synthesis worker (QThread)
 # ===========================================================================
@@ -452,6 +494,11 @@ class SynthesisWorker(QThread):
         # is thread-safe.
         blends: Optional[Mapping[str, "VoiceBlend"]] = None,
         parent: Optional[QObject] = None,
+        # Phase 2 - SSML-lite Controls. Opt-in boolean
+        # forwarded verbatim to engine.generate_speech;
+        # defaults to False for backward compat with
+        # Phase 1 callers/tests.
+        apply_ssml: bool = False,
     ) -> None:
         super().__init__(parent)
         self._text = text
@@ -478,6 +525,11 @@ class SynthesisWorker(QThread):
         self._blends: Optional[dict] = (
             dict(blends) if blends else None
         )
+        # Phase 2 - SSML-lite. Snapshot the bool at
+        # start() time so a mid-run checkbox flip
+        # can't silently switch the engine from
+        # plain to SSML mode.
+        self._apply_ssml = bool(apply_ssml)  # SSML-GUI-E2
         # Tracks the previous segment index in `_on_chunk` to detect
         # "speaker changed" transitions in the stream of chunks. The
         # engine emits multiple chunks per segment; we surface one
@@ -583,6 +635,14 @@ class SynthesisWorker(QThread):
                 # blend registry to the engine so it can resolve
                 # saved blend names to tensors per-segment.
                 blends=self._blends,
+
+                # Phase 2 - SSML-lite. Forward the
+                # opt-in flag so the engine's
+                # _generate_ssml_segments path takes
+                # over when the editor has SSML
+                # markup + the checkbox was on at
+                # click time.
+                apply_ssml=self._apply_ssml,  # SSML-GUI-E3
             )
             if self._stop_requested:
                 # Engine raised but we caught gracefully above; belt + braces.
@@ -1210,6 +1270,16 @@ class KokoroStudioMain(QMainWindow):
         self._dialogue_chip_row = None  # type: ignore[assignment]
         self._dialogue_help_btn = None  # type: ignore[assignment]
 
+        # Phase 2 - SSML-lite Controls. Parity with
+        # the dialogue placeholders above: built in
+        # _build_controls_panel, wired in
+        # _wire_signals. None values safely defer any
+        # pre-build textChanged events.
+        self._ssml_chip = None  # type: ignore[assignment]  # SSML-GUI-E5
+        self._ssml_chip_row = None  # type: ignore[assignment]
+        self._ssml_help_btn = None  # type: ignore[assignment]
+        self._ssml_checkbox = None  # type: ignore[assignment]
+
         # Phase 2 - Voice Blending. Built in `_build_voice_panel`
         # and wired in `_wire_signals`. Pre-declared here so any
         # pre-build reads return None cleanly (parity with _dialogue_*).
@@ -1653,6 +1723,47 @@ class KokoroStudioMain(QMainWindow):
         self._dialogue_chip_row.setLayout(chip_row_inner)
         self._dialogue_chip_row.setVisible(False)
         layout.addWidget(self._dialogue_chip_row)
+
+        # ---- SSML-lite status chip (Phase 2) ---------------
+        # Inline hint that pops in whenever (a) the SSML
+        # Apply checkbox is on AND (b) the editor text
+        # contains at least one SSML-lite tag. Hidden
+        # otherwise so the controls row stays compact
+        # for plain-text scripts.
+        ssml_chip_row_inner = QHBoxLayout()  # SSML-GUI-E7
+        ssml_chip_row_inner.setSpacing(8)
+        self._ssml_chip = QLabel("")
+        self._ssml_chip.setObjectName("SSMLChip")
+        # Default emerald-on-dark style; the refresh
+        # slot swaps to amber when SSML collides with
+        # multi-speaker dialogue (engine silently drops
+        # SSML in that case).
+        self._ssml_chip.setStyleSheet(
+            "color: #10B981; background-color: rgba(16,185,129,0.10);"
+            " border: 1px solid rgba(16,185,129,0.35);"
+            " border-radius: 6px; padding: 5px 10px;"
+            " font-size: 11px; font-weight: 600;"
+        )
+        self._ssml_chip.setToolTip(
+            "SSML-lite markers detected in the editor.\n"
+            "\n"
+            "Click ? on the right for the full syntax reference."
+        )
+        ssml_chip_row_inner.addWidget(self._ssml_chip, 1)
+        self._ssml_help_btn = QPushButton("?")
+        self._ssml_help_btn.setProperty("role", "ghost")
+        self._ssml_help_btn.setFixedSize(28, 26)
+        self._ssml_help_btn.setToolTip(
+            "Show SSML-lite syntax examples"
+        )
+        self._ssml_help_btn.clicked.connect(
+            self._on_ssml_help_clicked
+        )
+        ssml_chip_row_inner.addWidget(self._ssml_help_btn)
+        self._ssml_chip_row = QWidget()
+        self._ssml_chip_row.setLayout(ssml_chip_row_inner)
+        self._ssml_chip_row.setVisible(False)
+        layout.addWidget(self._ssml_chip_row)
         # ---- Row 2: action buttons ----
         row2 = QHBoxLayout()
         row2.setSpacing(8)
@@ -1682,6 +1793,25 @@ class KokoroStudioMain(QMainWindow):
         self._pron_count_label.setObjectName("Counter")
         row2.addSpacing(12)
         row2.addWidget(self._pron_count_label)
+
+        # SSML-lite opt-in checkbox (Phase 2).
+        # Default OFF so the classic plain-text path
+        # stays the baseline; users flip it on when
+        # they want <break>/<emphasis>/<prosody> tags
+        # to take effect.
+        self._ssml_checkbox = QCheckBox("Apply SSML")  # SSML-GUI-E6
+        self._ssml_checkbox.setChecked(False)
+        self._ssml_checkbox.setToolTip(
+            "When enabled, the editor text is routed "
+            "through the SSML-lite parser before synthesis.\n"
+            "\n"
+            "Supported tags (see ? button next to the chip):\n"
+            "  <break time=\"Xs\"/>  insert X seconds of silence\n"
+            "  <emphasis>w</emphasis> slow down word w\n"
+            "  <prosody rate=\"fast\">speeds up wrapped text</prosody>"
+        )
+        row2.addSpacing(12)
+        row2.addWidget(self._ssml_checkbox)
 
         # Streaming playback toggle (Phase 2). Default ON — this is the
         # headline feature. Disabled when the platform reports no audio
@@ -1751,6 +1881,16 @@ class KokoroStudioMain(QMainWindow):
     def _wire_signals(self) -> None:
         # Editor behavior
         self._editor.textChanged.connect(self._on_text_changed)
+
+        # SSML-lite chip refresh on every keystroke
+        # (Phase 2). _refresh_ssml_chip itself
+        # short-circuits on detect_ssml(text) so this
+        # stays sub-millisecond for plain-text scripts.
+        self._editor.textChanged.connect(  # SSML-GUI-E10
+            lambda: self._refresh_ssml_chip(
+                self._editor.toPlainText()
+            )
+        )
         # Drag-and-drop: the editor's `fileDropped` signal bubbles the
         # absolute path of the dropped file; main window decides whether
         # to overwrite / append.
@@ -1764,6 +1904,16 @@ class KokoroStudioMain(QMainWindow):
         # Pronunciation controls.
         self._pron_checkbox.toggled.connect(self._on_pron_toggle)
         self._pron_edit_btn.clicked.connect(self._on_edit_pronunciation_clicked)
+
+        # SSML-lite checkbox (Phase 2). Toggling
+        # immediately re-evaluates the chip so users
+        # see the chip appear or vanish the same tick
+        # they flip the checkbox.
+        self._ssml_checkbox.toggled.connect(  # SSML-GUI-E11
+            lambda _checked: self._refresh_ssml_chip(
+                self._editor.toPlainText()
+            )
+        )
 
         # Streaming toggle: when flipped off mid-run, mirrors no behaviour
         # change because the sink is already provisioned/teardown-managed
@@ -2203,6 +2353,71 @@ class KokoroStudioMain(QMainWindow):
             row.setVisible(False)
 
     # ----------------- Slot: per-segment status updates
+
+    # ----------------- Slot: SSML-lite chip refresh (Phase 2)
+    def _refresh_ssml_chip(self, text: str) -> None:  # SSML-GUI-E8
+        """Show / hide the inline SSML-lite chip row.
+
+        Hidden when EITHER (a) the Apply SSML checkbox
+        is OFF, OR (b) the text doesn't contain SSML-
+        lite markup. When the multi-speaker dialogue
+        chip is also visible, SSML is silently ignored
+        by the engine; we surface this in chip text +
+        amber colour so the user doesn't think their
+        tags are doing something.
+        """
+        # getattr defends against textChanged firing
+        # before the chip widget is built (parity with
+        # _refresh_dialogue_chip).
+        chip = getattr(self, "_ssml_chip", None)
+        row = getattr(self, "_ssml_chip_row", None)
+        cb = getattr(self, "_ssml_checkbox", None)
+        if chip is None or row is None or cb is None:
+            return  # pre-build or mid-teardown window
+        if not cb.isChecked():
+            row.setVisible(False)
+            return
+        try:
+            from kokoro_studio.ssml import (
+                detect_ssml, parse_ssml, summarize_ssml,
+            )
+        except ImportError:
+            row.setVisible(False)
+            return
+        if not detect_ssml(text):
+            row.setVisible(False)
+            return
+        segs = parse_ssml(text)
+        summary = summarize_ssml(segs)
+        if not summary:
+            row.setVisible(False)
+            return
+        # If the multi-speaker dialogue chip is
+        # currently visible, SSML is silently ignored
+        # by the engine -- surface this in the chip
+        # so the user doesn't think their tags are
+        # taking effect.
+        dialogue_row_visible = bool(
+            getattr(self, "_dialogue_chip_row", None)
+            and self._dialogue_chip_row.isVisible()
+        )
+        if dialogue_row_visible:
+            chip.setStyleSheet(
+                "color: #F59E0B; background-color: rgba(245,158,11,0.10);"
+                " border: 1px solid rgba(245,158,11,0.35);"
+                " border-radius: 6px; padding: 5px 10px;"
+                " font-size: 11px; font-weight: 600;"
+            )
+            chip.setText(f"\u26A1 SSML: {summary} (ignored in dialogue mode)")
+        else:
+            chip.setStyleSheet(
+                "color: #10B981; background-color: rgba(16,185,129,0.10);"
+                " border: 1px solid rgba(16,185,129,0.35);"
+                " border-radius: 6px; padding: 5px 10px;"
+                " font-size: 11px; font-weight: 600;"
+            )
+            chip.setText(f"\u26A1 SSML: {summary}")
+        row.setVisible(True)
     def _on_segment_started(self, seg_idx: int) -> None:
         """Update status bar with the active speaker on transitions.
 
@@ -2282,6 +2497,77 @@ class KokoroStudioMain(QMainWindow):
         # Triple-quoted string dodges the adjacent-literal
         # concatenation pitfall that bit earlier scripts.
         sample.setPlainText(DIALOGUE_HELP_SAMPLE)
+        sample.setMinimumHeight(180)
+        root.addWidget(sample, 1)
+
+        bbox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        close_btn = bbox.button(QDialogButtonBox.StandardButton.Ok)
+        close_btn.setText("Got it")
+        close_btn.setProperty("role", "primary")
+        bbox.accepted.connect(dlg.accept)
+        root.addWidget(bbox)
+
+        dlg.exec()
+
+    # ----------------- Slot: SSML-lite help button (Phase 2)
+    def _on_ssml_help_clicked(self) -> None:  # SSML-GUI-E9
+        """Popup a modal dialog with SSML-lite tag examples.
+
+        Triggered by the small ? button next to the
+        inline chip. Mirrors
+        _on_dialogue_help_clicked so the two feature
+        entrypoints feel identical.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("SSML-lite Controls")
+        dlg.resize(640, 480)
+        dlg.setStyleSheet(SETTINGS_QSS)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(10)
+
+        title = QLabel("\u26A1  SSML-lite Controls")
+        title.setObjectName("SettingsH1")
+        root.addWidget(title)
+
+        intro = QLabel(
+            "Tag-style controls for inline pauses, "
+            "emphasis, and rate override. Type the "
+            "literal markup into the editor and tick "
+            "<b>Apply SSML</b>"
+            " on the controls panel.<br><br>"
+            "<b>Notes:</b>"
+            "<ul>"
+            "<li>SSML-lite and multi-speaker dialogue are"
+            " mutually exclusive. Dialogue mode wins"
+            "the chip turns amber to warn you.</li>"
+            "<li>Tags work inside sentences: <code>he said"
+            " &lt;emphasis&gt;wait&lt;/emphasis&gt;!</code>"
+            " is valid.</li>"
+            "<li>No nesting: open and close each tag in"
+            " the order they appear; unclosed tags are"
+            " kept literal as text and surface a stderr"
+            " warning.</li>"
+            "</ul>"
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        intro.setObjectName("SettingsBlock")
+        intro.setOpenExternalLinks(True)
+        root.addWidget(intro)
+
+        sample = QPlainTextEdit(dlg)
+        sample.setReadOnly(True)
+        sample.setStyleSheet(
+            "background-color: #1F2329; color: #E8EAED;"
+            " border: 1px solid #252932; border-radius: 8px;"
+            " padding: 10px;"
+            " font-family: 'Consolas', 'Cascadia Code',"
+            " 'JetBrains Mono', monospace;"
+            " font-size: 12px;"
+        )
+        sample.setPlainText(SSML_HELP_SAMPLE)
         sample.setMinimumHeight(180)
         root.addWidget(sample, 1)
 
@@ -2986,6 +3272,12 @@ class KokoroStudioMain(QMainWindow):
             # blend snapshot to the worker so saved blend
             # names resolve to tensors at run time.
             blends=blends,
+
+            # Phase 2 - SSML-lite. Snapshot the
+            # checkbox state at click time so a
+            # mid-run flip can't trigger the
+            # half-parsed-execution footgun.
+            apply_ssml=self._ssml_checkbox.isChecked(),  # SSML-GUI-E12
         )
         self._worker.chunk_ready.connect(self._on_streaming_chunk)
         # Multi-speaker dialogue: fires once per voice transition
@@ -3679,3 +3971,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+# [SSML-GUI-HOOKS-APPLIED-v2-LINE-ANCHORED]

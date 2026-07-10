@@ -481,6 +481,7 @@ def generate_speech(
     speaker_gap_s: float = _DIALOGUE_DEFAULT_GAP_S,
     voice_blend: Union["VoiceBlend", Tuple[str, str, float], None] = None,
     blends: Optional[Mapping[str, "VoiceBlend"]] = None,
+    apply_ssml: bool = False,
 ) -> np.ndarray:
     """Synthesize `text` with Kokoro and return the audio (float32) at 24 kHz.
 
@@ -560,6 +561,16 @@ def generate_speech(
                        custom blend without touching the persistent
                        JSON file. When `None` (the default) the engine
                        lazily reads `<Documents>/KokoroStudio/voice_blends.json`.
+        apply_ssml:   Phase 2 — SSML-lite Controls. When True (opt-in),
+                       the text is routed through `kokoro_studio.ssml.parse_ssml`
+                       so `<break time="..."/>`, `<emphasis>...</emphasis>`,
+                       and `<prosody rate="...">...</prosody>` expand into
+                       silence gaps / per-segment speed scaling. Mutually
+                       exclusive with `multi_speaker`: if both are set the
+                       function silently ignores `apply_ssml` and proceeds
+                       with multi-speaker routing (dialogue markers win).
+                       Default False for backward compat — the GUI flips it
+                       on via a user-facing checkbox.
 
     Returns:
         numpy.ndarray float32 mono at 24 kHz.
@@ -742,6 +753,38 @@ def generate_speech(
     # `resolved_voice` is either a string (built-in or saved blend name)
     # OR a torch.Tensor (computed via `voice_blend` arg). KPipeline
     # accepts both directly, so we pass through without branching.
+    # ---- SSML-lite routing (Phase 2) -------------------------------
+    # If the user opted in AND the text contains SSML-lite markup AND
+    # we're not in multi-speaker mode (multi-speaker wins — dialogue
+    # markers control `voice=` per-segment which SSML doesn't), route
+    # through `_generate_ssml_segments` which inserts `<break>` silences
+    # and per-segment `<prosody rate>` speed overrides. The
+    # `detect_ssml(text)` short-circuit keeps the plain-text path
+    # untouched for the vast majority of generations that have no markup.
+    if apply_ssml and not multi_speaker:
+        from kokoro_studio.ssml import detect_ssml, parse_ssml
+        if detect_ssml(text):
+            ssml_segs = parse_ssml(text)
+            print(
+                f"[Kokoro] SSML-lite routing: {len(ssml_segs)} segments "
+                f"({sum(1 for s in ssml_segs if s.kind == 'break')} breaks, "
+                f"{sum(1 for s in ssml_segs if s.kind == 'emphasis')} emphasis, "
+                f"{sum(1 for s in ssml_segs if s.kind == 'prosody')} prosody)",
+                file=sys.stderr,
+            )
+            return _generate_ssml_segments(
+                ssml_segments=ssml_segs,
+                base_text=text,
+                voice=resolved_voice,
+                lang_code=lang_code,
+                speed=speed,
+                output_path=output_path,
+                output_format=output_format,
+                on_chunk=on_chunk,
+                stop_check=stop_check,
+                pronunciation_rules=pronunciation_rules,
+            )
+
     pipe_kwargs: Dict[str, object] = {"voice": resolved_voice, "speed": speed}
     if split_pattern is not None:
         pipe_kwargs["split_pattern"] = split_pattern
@@ -948,6 +991,188 @@ def _generate_dialogue_segments(
             f"({elapsed:.2f}s of generation, "
             f"{len(full_audio)/SAMPLE_RATE:.2f}s of audio, "
             f"{len(segments)} segments)",
+            file=sys.stderr,
+        )
+
+    return full_audio
+
+
+# ---------------------------------------------------------------------------
+# SSML-lite synthesis (Phase 2 - SSML-lite Controls)
+# ---------------------------------------------------------------------------
+
+def _generate_ssml_segments(
+    ssml_segments: List["SSMLSegment"],
+    base_text: str,
+    voice: object,
+    lang_code: str,
+    speed: float,
+    output_path: Optional[str],
+    output_format: Optional[str],
+    on_chunk: "Callable[[int, int, np.ndarray], None]",
+    stop_check: "Callable[[], bool]",
+    pronunciation_rules: Optional[Dict[str, str]],
+) -> np.ndarray:
+    """Per-segment synthesis path used when ``apply_ssml=True``.
+
+    The SSML-lite layer is *flat* by design (no nesting): we walk the
+    parsed segment list and synthesise each ``text`` / ``emphasis`` /
+    ``prosody`` segment as one ``pipeline(...)`` call (Kokoro bakes the
+    voice style vector into the forward pass — speed overrides inside
+    a single call aren't possible), then insert silence zeros for
+    ``break`` segments and emit them through the same ``on_chunk``
+    callback so a real-time streaming consumer plays the pauses too.
+
+    Per-segment contract:
+      * Pronunciation rules rewrite the *plain text* of each segment
+        (only; SSML tags never go through the dict — the parser strips
+        them out into discrete ``SSMLSegment.kind`` fields before this
+        helper runs).
+      * ``<emphasis>`` and ``<prosody rate="...">`` multiply the base
+        ``speed``: the effective speed is ``clip(base * seg.speed_mult,
+        SPEED_MIN, SPEED_MAX]``. A ``<prosody rate="0.5">`` line at
+        base speed 1.0 therefore renders at 0.5x (half-speed), while
+        a ``<prosody rate="2.0">`` at the engine max renders at
+        ``SPEED_MAX``. Out-of-range raw rates from the parser were
+        already clamped in ``kokoro_studio.ssml.SPEED_MULT_MAX`` /
+        ``SPEED_MULT_MIN``; this layer adds the engine's defence-in-
+        depth clamp so a future caller passing hand-rolled segments
+        can't blow up the pipeline.
+      * ``<break time="..."/>`` segments emit ``np.zeros(int(duration_s *
+        SAMPLE_RATE))`` mono float32 silence. They pass through
+        ``on_chunk`` with ``chunk_idx = dialogue.CHUNK_IDX_GAP`` (same
+        sentinel multi-speaker uses for cross-segment silence) so a
+        consumer can distinguish synthetic silence from real audio.
+
+    Returns:
+        numpy.ndarray float32 mono at 24 kHz, with all text segments
+        concatenated in input order, punctuated by break silences.
+    """
+    from kokoro_studio.ssml import SSMLSegment  # type-only: lazy import below
+    from kokoro_studio.dialogue import CHUNK_IDX_GAP  # same sentinel as dialogue
+    from kokoro_studio.pronunciation import apply_substitutions
+
+    all_audio: List[np.ndarray] = []
+    start = time.time()
+    pipeline = _get_pipeline(lang_code)
+
+    text_kinds = {"text", "emphasis", "prosody"}
+
+    for seg_idx, seg in enumerate(ssml_segments):
+        if stop_check is not None and stop_check():
+            raise RuntimeError("Synthesis cancelled by caller.")
+
+        if seg.kind == "break":
+            # SSML-lite pause: emit exact-duration zero-filled float32
+            # silence. ``duration_s`` was already validated by the
+            # parser (>= BROKEN down to a minimum of 1 ms to keep
+            # numpy happy). We still coerce here in case a caller
+            # bypasses ``parse_ssml`` with hand-rolled segments.
+            n_samples = max(1, int(round(float(seg.duration_s) * SAMPLE_RATE)))
+            silence = np.zeros(n_samples, dtype=np.float32)
+            all_audio.append(silence)
+            print(
+                f"  - SSML break @ seg {seg_idx + 1}/{len(ssml_segments)}: "
+                f"{seg.duration_s:.3f}s "
+                f"({n_samples} samples)",
+                file=sys.stderr,
+            )
+            if on_chunk is not None:
+                try:
+                    on_chunk(seg_idx, CHUNK_IDX_GAP, silence)
+                except Exception as cb_err:
+                    print(
+                        f"  ! on_chunk callback raised (break): {cb_err}",
+                        file=sys.stderr,
+                    )
+            continue
+
+        if seg.kind not in text_kinds:
+            # Unknown kind from a future SSML extension: emit nothing
+            # (parser already tried to fold unknown tags into text
+            # content upstream, so this only fires for hand-rolled
+            # segments). Bail loudly once so a developer notice.
+            print(
+                f"  ! SSML seg {seg_idx + 1}/{len(ssml_segments)}: "
+                f"unknown kind '{seg.kind}', skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        # Apply per-segment pronunciation rewrite on the plain text
+        # ONLY. SSML tags aren't in `seg.text` — the parser stripped
+        # them into discrete segments already — so the dict is safe
+        # to apply wholesale here.
+        seg_text = seg.text
+        if pronunciation_rules and seg_text:
+            seg_text = apply_substitutions(seg_text, pronunciation_rules)
+
+        # A pure-whitespace segment (e.g. between two adjacent blocks)
+        # produces no audio and no warning; skip Kokoro entirely so we
+        # don't pay the model-call cost.
+        if not seg_text or not seg_text.strip():
+            continue
+
+        # Per-segment speed override: ``base_speed * speed_mult``,
+        # clamped to the engine's safe band. Segments with
+        # ``speed_mult == 1.0`` (the dict default for kind='text' and
+        # kind='emphasis') are indistinguishable from baseline; we
+        # still pass the multiplied value to keep the path uniform.
+        effective_speed = max(
+            SPEED_MIN,
+            min(SPEED_MAX, float(speed) * float(seg.speed_mult)),
+        )
+
+        print(
+            f"  - SSML seg {seg_idx + 1}/{len(ssml_segments)}: "
+            f"kind={seg.kind}, speed_mult={seg.speed_mult:.2f} "
+            f"(effective={effective_speed:.2f}), "
+            f"len(text)={len(seg_text)}",
+            file=sys.stderr,
+        )
+
+        seg_audio_parts: List[np.ndarray] = []
+        for chunk_idx, (_g, _p, audio) in enumerate(
+            pipeline(seg_text, voice=voice, speed=effective_speed)
+        ):
+            a = np.asarray(audio, dtype=np.float32)
+            seg_audio_parts.append(a)
+            if on_chunk is not None:
+                try:
+                    on_chunk(seg_idx, chunk_idx, a)
+                except Exception as cb_err:
+                    print(
+                        f"  ! on_chunk callback raised (seg {seg_idx}): "
+                        f"{cb_err}",
+                        file=sys.stderr,
+                    )
+            if stop_check is not None and stop_check():
+                raise RuntimeError("Synthesis cancelled by caller.")
+
+        if seg_audio_parts:
+            all_audio.append(np.concatenate(seg_audio_parts))
+
+    if not all_audio:
+        raise RuntimeError(
+            "SSML-lite path produced no audio (all segments were breaks "
+            "or empty)."
+        )
+
+    full_audio = np.concatenate(all_audio)
+    elapsed = time.time() - start
+
+    if output_path:
+        effective_format = (
+            output_format.lower()
+            if output_format is not None
+            else _infer_format_from_path(output_path)
+        )
+        save_audio(full_audio, output_path, output_format=output_format)
+        print(
+            f"[Kokoro] Saved {output_path}  ({effective_format.upper()}) "
+            f"({elapsed:.2f}s of generation, "
+            f"{len(full_audio)/SAMPLE_RATE:.2f}s of audio, "
+            f"SSML-lite with {len(ssml_segments)} segments)",
             file=sys.stderr,
         )
 

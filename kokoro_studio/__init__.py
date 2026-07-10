@@ -11,6 +11,7 @@ The package is organised as follows:
   * `kokoro_studio.pronunciation`   pronunciation dictionary (load / save / apply)
   * `kokoro_studio.streaming`       real-time PCM streaming (Phase 2)
   * `kokoro_studio.blending`        voice blend presets (Phase 2 - Voice Blending)
+  * `kokoro_studio.ssml`            SSML-lite markup parser (Phase 2 - SSML-lite Controls)
   * `kokoro_studio.gui`             PySide6 main window
 """
 
@@ -27,6 +28,7 @@ from kokoro_studio import (
     pronunciation,
     streaming,
     blending,
+    ssml,
     gui,
 )
 
@@ -40,7 +42,7 @@ __all__ = [
     "engine",
     "document_loader",
     "pronunciation",
-    "streaming",
-    "blending",
+    "streaming",    "blending",
+    "ssml",
     "gui",
-]
+]  

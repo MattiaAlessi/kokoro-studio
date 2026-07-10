@@ -230,11 +230,37 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
     save/load, and reserved-name collision
   - _Complexity: Medium-High_
 
-- [ ] **SSML-lite Controls**
-  - Parse simplified markup: `<break time="1s"/>`, `<emphasis>word</emphasis>`, `<prosody rate="slow">text</prosody>`
-  - Insert silence arrays for pauses
-  - Adjust speed per segment
-  - Does NOT require engine-level SSML — simulated via text pre-processing + chunk manipulation
+- [x] **SSML-lite Controls** 🎙 ✅ *shipped*
+  - New `kokoro_studio.ssml` module: `SSMLSegment` frozen dataclass
+    with `kind` ∈ {'text','break','emphasis','prosody'} + 4 classmethod
+    factories + `parse_ssml` (lenient regex parser, no external deps),
+    `detect_ssml` (cheap pre-check), `summarize_ssml` (chip-text
+    formatter). Whitespace-only segments are dropped; unknown tags are
+    preserved as raw text so typos surface as literal characters in stderr.
+  - Engine integration: `generate_speech(apply_ssml: bool = False, ...)`
+    opt-in kwarg routes through `_generate_ssml_segments` whenever the
+    text contains SSML-lite markup AND multi-speaker is OFF.
+    Per-segment synthesis handles `<break time="..."/>` silence via
+    `np.zeros(duration_s * SAMPLE_RATE)` (length 1 ms – 60 s validated
+    by the parser) and `<prosody rate="...">` per-segment speed scaling
+    (numeric 0.5..2.0 + token aliases x-slow/slow/medium/fast/x-fast,
+    all clamped to engine's `[SPEED_MIN, SPEED_MAX]` safe band before
+    `pipeline(text, voice=..., speed=effective)` is called). `<emphasis>`
+    is a fixed 0.85× rate.
+  - Multi-speaker mode takes precedence when both are set; the engine
+    silently drops SSML and the GUI chip turns amber (`#F59E0B`) with
+    "(ignored in dialogue mode)" so the user knows their tags are inert.
+  - 56 unit tests in `tests/test_ssml.py` cover dataclass factories,
+    whitespace-dropping, unknown-tag preservation, rate-token aliases
+    (numeric + named), `detect_ssml` fast-path, unicode round-trip
+    (`c\u00e9f\u00e9 na\u00eefvely`), back-to-back breaks, `parse_ssml(None)`
+    graceful handling, and the speed-mult clamp invariants.
+  - GUI: "Apply SSML" checkbox on the controls panel (default OFF for
+    backward-compat) + inline emerald SSML chip (`#10B981` on dark
+    surfaces) that updates on every keystroke AND on checkbox toggle,
+    paired with a `?` help-button modal containing the `SSML_HELP_SAMPLE`
+    syntax cheatsheet. `SynthesisWorker` snapshots `apply_ssml` at
+    `.start()` time so a mid-run checkbox flip never changes what gets run.
   - _Complexity: Medium_
 
 ### Research Tasks
@@ -475,14 +501,14 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 ## Current Status
 
-**Overall Progress:** 7 / 20 features completed
+**Overall Progress:** 8 / 20 features completed
 
 **Current Phase:** Phase 2 — Core TTS Advancements *(in progress)*
 
-**Just Shipped:** Voice Blending / Mixing 🎛
+**Just Shipped:** SSML-lite Controls 🎙
 
-**Next Up:** SSML-lite Controls
+**Next Up:** Generation History
 
 ---
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-07-10_ (SSML-lite shipped)
