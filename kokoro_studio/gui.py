@@ -132,6 +132,7 @@ from kokoro_studio.streaming import (  # type: ignore
     default_audio_output_is_available,
     make_kokoro_audio_format,
 )
+from kokoro_studio.history import GenerationHistory, HistoryEntry  # type: ignore
 
 
 # ===========================================================================
@@ -1315,6 +1316,13 @@ class KokoroStudioMain(QMainWindow):
         # Documents/KokoroStudio/voice_blends.json.
         self._loaded_blends: dict = {}
         self._blend_dict_path = _default_output_dir() / "voice_blends.json"
+        # Phase 3 - Generation History. SQLite log of every successful
+        # synthesis, persisted next to the output folder.
+        self._history = GenerationHistory(
+            str(_default_output_dir() / "history.db")
+        )
+        self._history_widget = None  # type: ignore[assignment]
+        self._history_table = None    # type: ignore[assignment]
         # Suppresses the alpha_slider <-> alpha_spin feedback loop.
         self._suppress_blend_alpha_sync = False
         # Set by `_on_preview_blend_clicked` while a preview is
@@ -1633,9 +1641,241 @@ class KokoroStudioMain(QMainWindow):
         f = QFont()
         f.setPointSize(11)
         self._editor.setFont(f)
-        layout.addWidget(self._editor, 1)
+
+        # Phase 3 - Generation History. Wrap the editor and the history
+        # list in a tab widget so users can switch between composing and
+        # browsing past generations.
+        self._editor_tabs = QTabWidget()
+        self._editor_tabs.setDocumentMode(True)
+
+        editor_container = QWidget()
+        editor_layout = QVBoxLayout(editor_container)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self._editor, 1)
+
+        self._history_widget = self._build_history_tab()
+        self._editor_tabs.addTab(editor_container, "Editor")
+        self._editor_tabs.addTab(self._history_widget, "History")
+
+        layout.addWidget(self._editor_tabs, 1)
+
 
         return panel
+
+
+    # ================================================== Generation History
+    def _build_history_tab(self) -> QWidget:
+        """Build the History tab: a table of past generations + action buttons."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # Action buttons row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self._history_play_btn = QPushButton("▶  Play")
+        self._history_play_btn.setProperty("role", "ghost")
+        self._history_play_btn.setToolTip("Play the selected generation")
+        self._history_play_btn.clicked.connect(self._on_history_play)
+        btn_row.addWidget(self._history_play_btn)
+
+        self._history_load_btn = QPushButton("📋  Load text")
+        self._history_load_btn.setProperty("role", "ghost")
+        self._history_load_btn.setToolTip("Load the original text into the editor")
+        self._history_load_btn.clicked.connect(self._on_history_load)
+        btn_row.addWidget(self._history_load_btn)
+
+        self._history_export_btn = QPushButton("💾  Re-export")
+        self._history_export_btn.setProperty("role", "ghost")
+        self._history_export_btn.setToolTip("Save the audio to a new file")
+        self._history_export_btn.clicked.connect(self._on_history_reexport)
+        btn_row.addWidget(self._history_export_btn)
+
+        self._history_delete_btn = QPushButton("🗑  Delete")
+        self._history_delete_btn.setProperty("role", "danger")
+        self._history_delete_btn.setToolTip("Remove the selected entry from history")
+        self._history_delete_btn.clicked.connect(self._on_history_delete)
+        btn_row.addWidget(self._history_delete_btn)
+
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        # History table
+        self._history_table = QTableWidget(0, 6)
+        self._history_table.setHorizontalHeaderLabels(
+            ["Time", "Voice", "Speed", "Duration", "Format", "Text snippet"]
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._history_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.Stretch
+        )
+        self._history_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._history_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._history_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._history_table.setWordWrap(False)
+        self._history_table.setToolTip(
+            "Select a generation and use the buttons above to play, "
+            "reload its text, re-export the audio, or delete the entry."
+        )
+        layout.addWidget(self._history_table, 1)
+
+        # Keep action buttons disabled until a row is selected.
+        self._history_table.itemSelectionChanged.connect(
+            self._on_history_selection_changed
+        )
+
+        self._refresh_history_tab()
+        self._on_history_selection_changed()
+        return widget
+
+    def _refresh_history_tab(self) -> None:
+        """Reload the history table from the SQLite database."""
+        if self._history_table is None:
+            return
+        # Preserve the currently selected entry id so a refresh does not
+        # lose the user's selection.
+        selected_id = None
+        selected = self._history_table.selectedItems()
+        if selected:
+            selected_id = self._history_table.item(
+                selected[0].row(), 0
+            ).data(Qt.UserRole)
+
+        entries = self._history.get_recent(limit=50)
+        self._history_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            self._history_table.setItem(
+                row, 0, QTableWidgetItem(str(entry.created_at))
+            )
+            self._history_table.setItem(row, 1, QTableWidgetItem(entry.voice))
+            self._history_table.setItem(
+                row, 2, QTableWidgetItem(f"{entry.speed:.2f}x")
+            )
+            self._history_table.setItem(
+                row, 3, QTableWidgetItem(f"{entry.duration_s:.2f}s")
+            )
+            self._history_table.setItem(row, 4, QTableWidgetItem(entry.format))
+            snippet = entry.text.replace("\n", " ")[:80]
+            self._history_table.setItem(row, 5, QTableWidgetItem(snippet))
+            # Store the entry id in the first column for easy retrieval.
+            self._history_table.item(row, 0).setData(Qt.UserRole, entry.id)
+            if selected_id is not None and entry.id == selected_id:
+                self._history_table.selectRow(row)
+
+    def _on_history_selection_changed(self) -> None:
+        """Enable/disable history action buttons based on selection."""
+        enabled = bool(self._history_table.selectedItems())
+        self._history_play_btn.setEnabled(enabled)
+        self._history_load_btn.setEnabled(enabled)
+        self._history_export_btn.setEnabled(enabled)
+        self._history_delete_btn.setEnabled(enabled)
+
+    def _selected_history_entry(self) -> Optional[HistoryEntry]:
+        """Return the currently selected history entry, or None."""
+        if self._history_table is None:
+            return None
+        selected = self._history_table.selectedItems()
+        if not selected:
+            return None
+        row = selected[0].row()
+        entry_id = self._history_table.item(row, 0).data(Qt.UserRole)
+        return self._history.get_by_id(entry_id)
+
+    def _on_history_play(self) -> None:
+        """Play the audio file of the selected history entry."""
+        entry = self._selected_history_entry()
+        if entry is None:
+            return
+        path = Path(entry.audio_path)
+        if not path.exists():
+            QMessageBox.warning(
+                self, "File not found",
+                f"The audio file no longer exists:\n{entry.audio_path}"
+            )
+            return
+        self._stop_streaming_sink()
+        self._last_audio_path = str(path)
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(str(path)))
+        self._player.play()
+
+    def _on_history_load(self) -> None:
+        """Load the original text of the selected entry into the editor."""
+        entry = self._selected_history_entry()
+        if entry is None:
+            return
+        self._editor.setPlainText(entry.text)
+        self._editor_tabs.setCurrentIndex(0)
+
+    def _on_history_reexport(self) -> None:
+        """Copy the audio file of the selected entry to a user-chosen path."""
+        entry = self._selected_history_entry()
+        if entry is None:
+            return
+        src = Path(entry.audio_path)
+        if not src.exists():
+            QMessageBox.warning(
+                self, "File not found",
+                f"The audio file no longer exists:\n{entry.audio_path}"
+            )
+            return
+        default = str(_default_output_dir() / f"Kokoro_reexport_{src.name}")
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            "Re-export audio",
+            default,
+            f"Audio files (*.{entry.format});;All files (*.*)",
+        )
+        if not dest:
+            return
+        try:
+            import shutil
+            shutil.copy2(str(src), dest)
+            self._status_label.setText(f"Re-exported to {Path(dest).name}")
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Re-export failed", f"{type(e).__name__}: {e}"
+            )
+
+    def _on_history_delete(self) -> None:
+        """Delete the selected history entry from the database."""
+        entry = self._selected_history_entry()
+        if entry is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete history entry?",
+            "Remove this generation from history?\nThe audio file will NOT be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._history.delete(entry.id)
+        self._refresh_history_tab()
 
     def _build_controls_panel(self) -> QWidget:
         panel = QFrame()
@@ -3368,6 +3608,14 @@ class KokoroStudioMain(QMainWindow):
         # already provisioned (the slot is documented below).
         self._output_edit.setReadOnly(True)
 
+        # Phase 3 - Generation History. Snapshot the generation
+        # metadata at click time so _on_synthesis_done logs exactly
+        # what was synthesised, even if the user edits the editor or
+        # changes voice/speed while the worker is running.
+        self._last_generation_text = text
+        self._last_generation_voice = voice
+        self._last_generation_speed = speed
+
         self._worker = SynthesisWorker(
             text=text,
             voice=voice,
@@ -3421,6 +3669,28 @@ class KokoroStudioMain(QMainWindow):
     def _on_synthesis_done(self, path: str, duration_s: float,
                            auto_play: bool, _audio: np.ndarray) -> None:
         self._last_audio_path = path
+
+        # Phase 3 - Generation History. Log every successful synthesis so
+        # users can replay, re-export, or reload previous generations.
+        # Uses the metadata snapshot taken at Generate-click time so the
+        # logged entry matches what was actually synthesised.
+        try:
+            text = getattr(self, "_last_generation_text", "")
+            if text and text.strip():
+                fmt = Path(path).suffix.lstrip(".").lower() or "wav"
+                self._history.add_generation(
+                    text=text,
+                    voice=self._last_generation_voice,
+                    speed=self._last_generation_speed,
+                    duration_s=duration_s,
+                    audio_path=path,
+                    output_format=fmt,
+                )
+                self._refresh_history_tab()
+        except Exception:
+            # History logging is best-effort; never block the main synthesis
+            # flow if the database is somehow unreachable.
+            pass
         size_bytes = 0
         try:
             size_bytes = os.path.getsize(path)
