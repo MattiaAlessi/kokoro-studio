@@ -17,7 +17,7 @@ contributions back to the upstream project. Even without a financial
 contribution you can:
 
 - **Report bugs** via the GitHub issue tracker.
-- **Improve documentation** — typos, missing examples, unclear wording.
+- **Improve documentation** typos, missing examples, unclear wording.
 - **Submit pull requests** for documented features on the roadmap
   (`PLAN.md`).
 - **Star the repository** to help others discover it.

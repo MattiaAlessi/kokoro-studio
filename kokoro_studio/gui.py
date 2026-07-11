@@ -421,6 +421,22 @@ Notes:
     the checkbox on by accident has zero side-effects.
 """
 
+# Short TTS samples (kept distinct from the long prose help-text docs
+# so the Insert-sample button in the help dialogs drops a runnable
+# script into the editor instead of documentation).
+DIALOGUE_HELP_TTS_SAMPLE = (
+    "[af_sky]: Hi traveller!\n"
+    "[af_nicole]: Greetings, friend.\n"
+    "[af_bella]: Let our tale begin.\n"
+    "And this line uses the default voice again."
+)
+
+SSML_HELP_TTS_SAMPLE = (
+    'Hello <break time="0.4s"/> I can pause, '
+    '<emphasis>emphasise</emphasis>, and '
+    '<prosody rate="fast">speak at speed</prosody>.'
+)
+
 
 # ===========================================================================
 # Background synthesis worker (QThread)
@@ -473,7 +489,8 @@ class SynthesisWorker(QThread):
     _EMPIRICAL_CHARS_PER_AUDIO_SEC = 13.0
     # Minimum telemetry before we emit a non-trivial ETA. The first
     # chunk's wall-clock is dominated by Python startup overhead in the
-    # worker, so the rate estimate from `idx == 0` is wildly inflated.
+    # worker, so the rate estimate from `cumulative_chunk_count == 0` is
+    # wildly inflated.
     _ETA_MIN_WARMUP_S = 0.5
     _ETA_MIN_CHUNKS = 2
 
@@ -570,7 +587,7 @@ class SynthesisWorker(QThread):
         # rate estimate, so we emit `-1` (“no estimate yet”).
         eta_seconds = -1.0
         if (elapsed_wallclock >= self._ETA_MIN_WARMUP_S
-                and (idx + 1) >= self._ETA_MIN_CHUNKS):
+                and (self._cumulative_chunk_count + 1) >= self._ETA_MIN_CHUNKS):
             rate = cum_seconds / elapsed_wallclock  # s_audio per s_wall
             if rate > 0.0:
                 est_total_audio = (
@@ -969,7 +986,7 @@ class SettingsDialog(QDialog):
             "<a href='https://huggingface.co/hexgrad/Kokoro-82M'>Kokoro-82M"
             "</a> neural TTS model \u2014 29 built-in voices, multi-format "
             "export (WAV / MP3 / FLAC / OGG), a pronunciation dictionary, "
-            "<b>multi-speaker dialogue mode</b>, and a growing set of audiobook / batch features.<br><br>"
+            "<b>multi-speaker dialogue mode</b>, <b>SSML-lite controls</b>, and a growing set of audiobook / batch features.<br><br>"
             f"<b>Created by:</b> "
             f"<a href='{creator_url}'>{self._CREATOR_HANDLE}</a> on GitHub."
             "<br><br>"
@@ -1279,6 +1296,9 @@ class KokoroStudioMain(QMainWindow):
         self._ssml_chip_row = None  # type: ignore[assignment]
         self._ssml_help_btn = None  # type: ignore[assignment]
         self._ssml_checkbox = None  # type: ignore[assignment]
+        # Discoverability banner: persistent QLabel above the editor.
+        # Hidden once the user has typed more than ~30 characters.
+        self._discoverability_banner = None  # type: ignore[assignment]
 
         # Phase 2 - Voice Blending. Built in `_build_voice_panel`
         # and wired in `_wire_signals`. Pre-declared here so any
@@ -1570,6 +1590,35 @@ class KokoroStudioMain(QMainWindow):
         header_row.addWidget(self._counter_label)
         layout.addLayout(header_row)
 
+        # Discoverability banner (Phase 2 power features).
+        self._discoverability_banner = QLabel(
+            '<html>💡 Try <b>SSML-lite controls</b> (<code>&lt;break&gt;</code>, <code>&lt;emphasis&gt;</code>, <code>&lt;prosody&gt;</code>) &mdash; tick <i>Apply SSML</i> on the right.<br>&nbsp;&nbsp;&nbsp;&nbsp;Or start a line with <code>[voice_name]:</code> for <b>Multi-Speaker Dialogue</b>.</html>'
+        )
+        self._discoverability_banner.setObjectName("DiscoverabilityBanner")
+        self._discoverability_banner.setStyleSheet(
+            "QLabel#DiscoverabilityBanner {"
+            "color: #4338ca;"
+            "background-color: rgba(99,102,241,0.08);"
+            "border: 1px solid rgba(99,102,241,0.25);"
+            "border-radius: 6px;"
+            "padding: 6px 10px;"
+            "font-size: 11px;"
+            "}"
+        )
+        # PySide6 >= 6.2: scoped enums.  Older 6.0/6.1: only the bare
+        # name `Qt.TextSelectableByMouse` exists.  Fall back gracefully.
+        _ts_flag = getattr(
+            getattr(Qt, "TextInteractionFlag", Qt),
+            "TextSelectableByMouse",
+            Qt.TextSelectableByMouse,
+        )
+        self._discoverability_banner.setTextInteractionFlags(_ts_flag)
+        # Explicitly declare the QLabel's text format as RichText so the
+        # banner does not silently degrade to plain text if a future
+        # edit removes the <html>...</html> prefix from BANNER_HTML.
+        self._discoverability_banner.setTextFormat(Qt.RichText)
+        layout.addWidget(self._discoverability_banner)
+
         # `DocumentDropEditor` is a tiny QPlainTextEdit subclass that
         # intercepts dragged file paths. We can't receive drops on a
         # raw `QPlainTextEdit` because Qt's default drag handler only
@@ -1812,6 +1861,14 @@ class KokoroStudioMain(QMainWindow):
         )
         row2.addSpacing(12)
         row2.addWidget(self._ssml_checkbox)
+        # Tiny '?' ghost button sat next to Apply SSML so users can
+        # open the SSML-lite help dialog without hunting through menus.
+        self._ssml_action_help_btn = QPushButton("?")
+        self._ssml_action_help_btn.setProperty("role", "ghost")
+        self._ssml_action_help_btn.setFixedSize(28, 26)
+        self._ssml_action_help_btn.setToolTip("Open SSML-lite help")
+        self._ssml_action_help_btn.clicked.connect(self._on_ssml_help_clicked)
+        row2.addWidget(self._ssml_action_help_btn)
 
         # Streaming playback toggle (Phase 2). Default ON — this is the
         # headline feature. Disabled when the platform reports no audio
@@ -1891,6 +1948,30 @@ class KokoroStudioMain(QMainWindow):
                 self._editor.toPlainText()
             )
         )
+        # Discoverability banner auto-hide: once the user has typed
+        # more than ~30 characters we assume they got the hint. The
+        # isVisible() guard short-circuits so post-hide keystrokes
+        # are cheap no-ops (no toPlainText() string copy).
+        if self._discoverability_banner is not None:
+            _banner = self._discoverability_banner
+            _ed = self._editor
+            # SingleShotConnection: the auto-hide connector only needs to
+            # fire ONCE (after the threshold is first crossed).  Using a
+            # defensive getattr for cross-version PySide6 compat mirrors
+            # the strategy used in the banner setTextInteractionFlags call.
+            # Bare form is portable across all PySide6 6.0+ (re-export of the scoped enum).
+            _single_shot = Qt.SingleShotConnection
+            self._editor.textChanged.connect(
+                lambda _b=_banner, _e=_ed: (
+                    _b.setVisible(False)
+                    if (
+                        _b.isVisible()
+                        and len(_e.toPlainText()) > 80
+                    )
+                    else None
+                ),
+                _single_shot,
+            )
         # Drag-and-drop: the editor's `fileDropped` signal bubbles the
         # absolute path of the dropped file; main window decides whether
         # to overwrite / append.
@@ -2505,6 +2586,20 @@ class KokoroStudioMain(QMainWindow):
         close_btn.setText("Got it")
         close_btn.setProperty("role", "primary")
         bbox.accepted.connect(dlg.accept)
+        # Insert button: drops the runnable DIALOGUE_HELP_TTS_SAMPLE
+        # into the editor without the user copy-pasting by hand.
+        # ActionRole buttons don't auto-close.  Closure-based
+        # insert+accept (QDialogButtonBox has no clickedButton() API).
+        def _handle_dialogue_insert():
+            # setPlainText MUST run before dlg.accept() or the
+            # editor update is lost on modal event-loop return.
+            self._editor.setPlainText(DIALOGUE_HELP_TTS_SAMPLE)
+            dlg.accept()
+        insert_btn = bbox.addButton(
+            "Insert sample script",
+            QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        insert_btn.clicked.connect(_handle_dialogue_insert)
         root.addWidget(bbox)
 
         dlg.exec()
@@ -2576,6 +2671,20 @@ class KokoroStudioMain(QMainWindow):
         close_btn.setText("Got it")
         close_btn.setProperty("role", "primary")
         bbox.accepted.connect(dlg.accept)
+        # Insert button: drops a runnable SSML-lite sample AND ticks
+        # the 'Apply SSML' checkbox so the tags take effect.
+        # Same closure-based insert+accept pattern as the dialogue handler.
+        def _handle_ssml_insert():
+            # setPlainText + setChecked MUST run before dlg.accept()
+            # or the editor / checkbox updates are lost on return.
+            self._editor.setPlainText(SSML_HELP_TTS_SAMPLE)
+            self._ssml_checkbox.setChecked(True)
+            dlg.accept()
+        insert_btn = bbox.addButton(
+            "Insert sample + enable SSML",
+            QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        insert_btn.clicked.connect(_handle_ssml_insert)
         root.addWidget(bbox)
 
         dlg.exec()
@@ -3284,7 +3393,6 @@ class KokoroStudioMain(QMainWindow):
         # so the status bar can show "Speaker X/Y: <voice>." In
         # single-speaker mode fires exactly once at startup.
         self._worker.segment_started.connect(self._on_segment_started)
-        self._worker.chunk_ready.connect(self._on_streaming_chunk)
         # Capture auto_play in a lambda closure (default arg avoids late-binding).
         self._worker.finished_ok.connect(
             lambda path, dur, audio, ap=auto_play:
