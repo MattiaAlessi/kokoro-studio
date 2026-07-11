@@ -918,6 +918,7 @@ def _generate_dialogue_segments(
             # one-tick synthesis per segment with zero benefit, so we
             # intentionally skip it.
             seg_lang = VOICES[seg.voice][0]  # used by get_pipeline_voices below
+        seg_pipeline = _get_pipeline(seg_lang)
         seg_pipeline_voices = _get_pipeline_voices(seg_lang)
         seg_resolved = resolve_voice_param(
             seg.voice, effective_blends or {}, seg_pipeline_voices,
