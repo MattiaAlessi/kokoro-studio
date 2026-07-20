@@ -312,14 +312,14 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
 
 ### Features
 
-- [ ] **Generation History**
+- [X] **Generation History**
   - SQLite or JSON log of every generation
   - Stores: text, voice, speed, timestamp, output path, duration
   - Instant re-play and re-export without re-generating
   - Searchable/filterable history panel
   - _Complexity: Medium_
 
-- [ ] **Batch Generation Queue**
+- [X] **Batch Generation Queue**
   - Queue multiple text blocks or import a list of texts
   - Background worker processes sequentially with progress
   - Each item gets its own output file

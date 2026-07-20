@@ -32,13 +32,16 @@ from kokoro_studio.streaming import (
     PcmRingBuffer, default_audio_output_is_available,
 )
 from kokoro_studio.gui.dialogs import (
-    BlendVoiceDialog, DialogueHelpDialog, HistoryDialog, PronunciationDialog,
-    SettingsDialog, SSMLHelpDialog,
+    BatchQueueDialog, BlendVoiceDialog, DialogueHelpDialog, HistoryDialog,
+    ProfilesDialog, PronunciationDialog, SettingsDialog, SSMLHelpDialog,
 )
 from kokoro_studio.gui.editor import DocumentDropEditor
 from kokoro_studio.gui.theme import (
     QSS, default_output_dir, default_output_path, format_bytes, format_duration,
     preview_phrase_for_lang,
+)
+from kokoro_studio.profiles import (
+    CharacterProfile, load_profiles, save_profiles,
 )
 from kokoro_studio.gui.workers import SynthesisWorker
 
@@ -93,6 +96,11 @@ class KokoroStudioMain(QMainWindow):
         self._ssml_checkbox: Optional[QCheckBox] = None
         self._discoverability_banner: Optional[QLabel] = None
 
+        # Character profiles state
+        self._profiles: dict[str, CharacterProfile] = {}
+        self._profiles_path = default_output_dir() / "profiles.json"
+        self._current_profile_name: Optional[str] = None
+
         # Blending state
         self._loaded_blends: dict = {}
         self._blend_dict_path = default_output_dir() / "voice_blends.json"
@@ -107,7 +115,9 @@ class KokoroStudioMain(QMainWindow):
 
         self._load_pron_dict()
         self._load_blends()
+        self._load_profiles()
         self._repopulate_voice_list(None)
+        self._refresh_profiles_combo()
         self._refresh_output_path()
         self._update_button_states()
 
@@ -194,6 +204,7 @@ class KokoroStudioMain(QMainWindow):
             btn.clicked.connect(slot)
             return btn
 
+        self._batch_btn = make_btn("📦 Batch", self._on_batch_clicked)
         self._history_btn = make_btn("🕒 History", self._on_history_clicked)
         self._blend_btn = make_btn("🎛 Blending", self._on_blending_clicked)
         self._pron_btn = make_btn("📖 Dictionary", self._on_pronunciation_clicked)
@@ -201,6 +212,7 @@ class KokoroStudioMain(QMainWindow):
         self._dialogue_help_btn = make_btn("🎭 Dialogue Help", self._on_dialogue_help_clicked)
 
         layout.addWidget(self._history_btn)
+        layout.addWidget(self._batch_btn)
         layout.addWidget(self._blend_btn)
         layout.addWidget(self._pron_btn)
         layout.addWidget(self._ssml_help_btn)
@@ -295,13 +307,36 @@ class KokoroStudioMain(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
-        # Row 1: voice readout | speed | output path
+        # Row 1: profile | voice readout | speed | output path
         row1 = QHBoxLayout()
         row1.setSpacing(14)
 
+        profile_box = QVBoxLayout()
+        profile_box.setSpacing(2)
+        profile_lbl = QLabel("CHARACTER PROFILE")
+        profile_lbl.setObjectName("SectionTitle")
+        profile_select_row = QHBoxLayout()
+        profile_select_row.setSpacing(4)
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(150)
+        self._profile_combo.setToolTip("Select a character profile to set voice & speed")
+        profile_select_row.addWidget(self._profile_combo, 1)
+        self._profiles_btn = QPushButton("🎭")
+        self._profiles_btn.setProperty("role", "ghost")
+        self._profiles_btn.setFixedSize(32, 32)
+        self._profiles_btn.setToolTip("Manage character profiles")
+        self._profiles_btn.clicked.connect(self._on_profiles_clicked)
+        profile_select_row.addWidget(self._profiles_btn)
+        profile_box.addWidget(profile_lbl)
+        profile_box.addLayout(profile_select_row)
+        profile_widget = QWidget()
+        profile_widget.setLayout(profile_box)
+        profile_widget.setMaximumWidth(260)
+        row1.addWidget(profile_widget)
+
         voice_box = QVBoxLayout()
         voice_box.setSpacing(2)
-        voice_lbl = QLabel("SELECTED VOICE")
+        voice_lbl = QLabel("VOICE")
         voice_lbl.setObjectName("SectionTitle")
         self._voice_readout = QLabel(DEFAULT_VOICE)
         self._voice_readout.setObjectName("VoiceReadout")
@@ -309,7 +344,7 @@ class KokoroStudioMain(QMainWindow):
         voice_box.addWidget(self._voice_readout)
         voice_widget = QWidget()
         voice_widget.setLayout(voice_box)
-        voice_widget.setMinimumWidth(220)
+        voice_widget.setMinimumWidth(180)
         row1.addWidget(voice_widget)
 
         speed_box = QVBoxLayout()
@@ -486,6 +521,7 @@ class KokoroStudioMain(QMainWindow):
         self._voice_list.currentItemChanged.connect(self._on_voice_changed)
         self._speed_spin.valueChanged.connect(self._on_speed_spin_changed)
         self._speed_slider.valueChanged.connect(self._on_speed_slider_changed)
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
 
         self._output_edit.editingFinished.connect(self._refresh_output_path_validity)
         self._browse_btn.clicked.connect(self._on_browse_clicked)
@@ -545,6 +581,31 @@ class KokoroStudioMain(QMainWindow):
         dlg = HistoryDialog(self._history, self)
         dlg.load_text_requested.connect(self._editor.setPlainText)
         dlg.play_requested.connect(self._play_file)
+        dlg.exec()
+
+    def _on_batch_clicked(self) -> None:
+        dlg = BatchQueueDialog(
+            editor_text=self._editor.toPlainText(),
+            current_voice=self._current_voice or DEFAULT_VOICE,
+            current_speed=self._speed_spin.value(),
+            current_format=self._current_output_format(),
+            pronunciation_rules=(
+                self._pron_rules if self._pron_checkbox.isChecked() else None
+            ),
+            blends=dict(self._loaded_blends) if self._loaded_blends else None,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_profiles_clicked(self) -> None:
+        dlg = ProfilesDialog(
+            profiles=self._profiles,
+            profiles_path=self._profiles_path,
+            current_voice=self._current_voice or DEFAULT_VOICE,
+            current_speed=self._speed_spin.value(),
+            parent=self,
+        )
+        dlg.profile_applied.connect(self._on_profile_applied)
         dlg.exec()
 
     def _on_blending_clicked(self) -> None:
@@ -827,6 +888,86 @@ class KokoroStudioMain(QMainWindow):
         voice = self._current_segments[seg_idx].voice
         total = len(self._current_segments)
         self._status_label.setText(f"Speaker {seg_idx + 1}/{total}: {voice} · generating...")
+
+    # --------------------------------------------------------- Character Profiles
+    def _load_profiles(self) -> None:
+        try:
+            self._profiles = load_profiles(self._profiles_path)
+        except Exception:
+            self._profiles = {}
+
+    def _refresh_profiles_combo(self) -> None:
+        sender = self.sender() if hasattr(self, 'sender') else None
+        # Don't re-trigger while we rebuild
+        self._profile_combo.blockSignals(True)
+        current = self._profile_combo.currentText()
+        self._profile_combo.clear()
+        self._profile_combo.addItem("— No profile —", None)
+        for name in sorted(self._profiles.keys()):
+            self._profile_combo.addItem(name, name)
+        # Restore selection if possible
+        idx = self._profile_combo.findText(current)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        else:
+            # Try the saved active profile name
+            if self._current_profile_name:
+                idx2 = self._profile_combo.findText(self._current_profile_name)
+                if idx2 >= 0:
+                    self._profile_combo.setCurrentIndex(idx2)
+                else:
+                    self._current_profile_name = None
+                    self._profile_combo.setCurrentIndex(0)
+            else:
+                self._profile_combo.setCurrentIndex(0)
+        self._profile_combo.blockSignals(False)
+
+    def _on_profile_selected(self, idx: int) -> None:
+        name = self._profile_combo.itemData(idx)
+        if not name:
+            self._current_profile_name = None
+            return
+        profile = self._profiles.get(name)
+        if profile and profile.voice:
+            self._current_profile_name = name
+            self._current_voice = profile.voice
+            self._speed_spin.blockSignals(True)
+            self._speed_spin.setValue(profile.speed)
+            self._speed_spin.blockSignals(False)
+            # Sync speed slider
+            slider_val = int(round(profile.speed * self._SPEED_TICK))
+            self._speed_slider.blockSignals(True)
+            self._speed_slider.setValue(slider_val)
+            self._speed_slider.blockSignals(False)
+            # Select the voice in the list without full rebuild
+            self._select_voice_in_list(profile.voice)
+            self._refresh_voice_readout()
+            self._refresh_output_path()
+            self._status_label.setText(
+                f"Profile {name!r} applied  ·  {profile.voice}  ·  {profile.speed:.2f}x"
+            )
+
+    def _select_voice_in_list(self, voice: str) -> None:
+        """Select the given voice in the voice list without a full rebuild."""
+        for i in range(self._voice_list.count()):
+            item = self._voice_list.item(i)
+            if item and item.data(Qt.UserRole) == voice:
+                self._voice_list.blockSignals(True)
+                self._voice_list.setCurrentRow(i)
+                self._voice_list.blockSignals(False)
+                return
+        # Voice not found in list (e.g. blend name) — fall back to full rebuild
+        self._repopulate_voice_list(None)
+
+    def _on_profile_applied(self, name: str, profile: object) -> None:
+        """Called when the ProfilesDialog emits profile_applied."""
+        self._load_profiles()  # Reload in case user saved a new one
+        self._refresh_profiles_combo()
+        # Try to select the applied profile in the combo
+        for i in range(self._profile_combo.count()):
+            if self._profile_combo.itemText(i) == name:
+                self._profile_combo.setCurrentIndex(i)
+                break
 
     # --------------------------------------------------------- Pronunciation
     def _load_pron_dict(self) -> None:
@@ -1312,7 +1453,8 @@ class KokoroStudioMain(QMainWindow):
     # --------------------------------------------------------- State helpers
     def _set_feature_controls_enabled(self, enabled: bool) -> None:
         for btn in (
-            self._history_btn, self._blend_btn, self._pron_btn,
+            self._history_btn, self._batch_btn, self._profiles_btn,
+            self._blend_btn, self._pron_btn,
             self._ssml_help_btn, self._dialogue_help_btn, self._settings_btn,
             self._open_doc_btn,
         ):
