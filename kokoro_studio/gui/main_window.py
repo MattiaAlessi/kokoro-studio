@@ -229,31 +229,26 @@ class KokoroStudioMain(QMainWindow):
 
     def _build_toolbar(self) -> QWidget:
         bar = QFrame()
-        bar.setObjectName("Panel")
+        bar.setObjectName("ToolbarGroup")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
 
-        def make_btn(text: str, slot) -> QPushButton:
-            btn = QPushButton(text)
-            btn.setProperty("role", "ghost")
+        def make_feature_btn(icon_text: str, label: str, slot) -> QPushButton:
+            btn = QPushButton(f"{icon_text} {label}")
+            btn.setProperty("role", "feature")
+            btn.setToolTip(label)
             btn.clicked.connect(slot)
             return btn
 
-        self._batch_btn = make_btn("📦 Batch", self._on_batch_clicked)
-        self._history_btn = make_btn("🕒 History", self._on_history_clicked)
-        self._blend_btn = make_btn("🎛 Blending", self._on_blending_clicked)
-        self._pron_btn = make_btn("📖 Dictionary", self._on_pronunciation_clicked)
-        self._post_process_btn = make_btn("🎚 Post-Process", self._on_post_process_clicked)
-        self._style_btn = make_btn("🎭 Style", self._on_style_clicked)
-        self._audiobook_btn = make_btn("📚 Audiobook", self._on_audiobook_clicked)
-        self._ssml_help_btn = make_btn("⚡ SSML Help", self._on_ssml_help_clicked)
-        self._dialogue_help_btn = make_btn("🎭 Dialogue Help", self._on_dialogue_help_clicked)
-
-        # Project buttons (right-aligned)
-        self._new_project_btn = make_btn("📄 New Project", self._on_new_project)
-        self._open_project_btn = make_btn("📂 Open Project", self._on_open_project)
-        self._save_project_btn = make_btn("💾 Save Project", self._on_save_project)
+        # Feature group: Core
+        self._batch_btn = make_feature_btn("📦", "Batch", self._on_batch_clicked)
+        self._history_btn = make_feature_btn("🕒", "History", self._on_history_clicked)
+        self._blend_btn = make_feature_btn("🎛", "Blend", self._on_blending_clicked)
+        self._pron_btn = make_feature_btn("📖", "Dict", self._on_pronunciation_clicked)
+        self._post_process_btn = make_feature_btn("🎚", "Audio", self._on_post_process_clicked)
+        self._style_btn = make_feature_btn("🎭", "Style", self._on_style_clicked)
+        self._audiobook_btn = make_feature_btn("📚", "Book", self._on_audiobook_clicked)
 
         layout.addWidget(self._history_btn)
         layout.addWidget(self._batch_btn)
@@ -262,12 +257,29 @@ class KokoroStudioMain(QMainWindow):
         layout.addWidget(self._post_process_btn)
         layout.addWidget(self._style_btn)
         layout.addWidget(self._audiobook_btn)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color: #2C303E; margin: 4px 2px;")
+        layout.addWidget(sep)
+
+        # Help group
+        self._ssml_help_btn = make_feature_btn("⚡", "SSML", self._on_ssml_help_clicked)
+        self._dialogue_help_btn = make_feature_btn("🎭", "Dialogue", self._on_dialogue_help_clicked)
         layout.addWidget(self._ssml_help_btn)
         layout.addWidget(self._dialogue_help_btn)
+
         layout.addStretch(1)
+
+        # Project group (right side)
+        self._new_project_btn = make_feature_btn("📄", "New", self._on_new_project)
+        self._open_project_btn = make_feature_btn("📂", "Open", self._on_open_project)
+        self._save_project_btn = make_feature_btn("💾", "Save", self._on_save_project)
         layout.addWidget(self._new_project_btn)
         layout.addWidget(self._open_project_btn)
         layout.addWidget(self._save_project_btn)
+
         return bar
 
     def _build_voice_panel(self) -> QWidget:
@@ -275,20 +287,50 @@ class KokoroStudioMain(QMainWindow):
         panel.setObjectName("Panel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        title = QLabel("VOICE LIBRARY")
+        # Header row with title and voice count
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        title = QLabel("VOICES")
         title.setObjectName("SectionTitle")
-        layout.addWidget(title)
+        header_row.addWidget(title)
+        header_row.addStretch(1)
+        self._voice_count_label = QLabel(str(len(list_voices())))
+        self._voice_count_label.setStyleSheet(
+            "color: #636882; font-size: 10px; font-weight: 600;"
+            " padding: 2px 8px; border: 1px solid #2C303E;"
+            " border-radius: 8px;"
+        )
+        header_row.addWidget(self._voice_count_label)
+        layout.addLayout(header_row)
 
+        # Search bar
+        search_frame = QFrame()
+        search_layout = QHBoxLayout(search_frame)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        self._voice_search = QLineEdit()
+        self._voice_search.setObjectName("VoiceSearch")
+        self._voice_search.setPlaceholderText("🔍  Search voices…")
+        self._voice_search.textChanged.connect(self._on_voice_search)
+        search_layout.addWidget(self._voice_search)
+        layout.addWidget(search_frame)
+
+        # Voice list
         self._voice_list = QListWidget()
         self._voice_list.setSelectionMode(QListWidget.SingleSelection)
         self._voice_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self._voice_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self._voice_list, 1)
 
-        self._preview_btn = QPushButton("▶  Preview selected voice")
+        # Preview button
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(6)
+        self._preview_btn = QPushButton("▶  Preview")
         self._preview_btn.setProperty("role", "ghost")
-        layout.addWidget(self._preview_btn)
+        self._preview_btn.setToolTip("Generate a short preview of the selected voice")
+        preview_row.addWidget(self._preview_btn, 1)
+        layout.addLayout(preview_row)
 
         return panel
 
@@ -357,33 +399,11 @@ class KokoroStudioMain(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
-        # Row 1: profile | voice readout | speed | output path
+        # ── Row 1: Voice readout · Speed · Format ──────────────────
         row1 = QHBoxLayout()
-        row1.setSpacing(14)
+        row1.setSpacing(16)
 
-        profile_box = QVBoxLayout()
-        profile_box.setSpacing(2)
-        profile_lbl = QLabel("CHARACTER PROFILE")
-        profile_lbl.setObjectName("SectionTitle")
-        profile_select_row = QHBoxLayout()
-        profile_select_row.setSpacing(4)
-        self._profile_combo = QComboBox()
-        self._profile_combo.setMinimumWidth(150)
-        self._profile_combo.setToolTip("Select a character profile to set voice & speed")
-        profile_select_row.addWidget(self._profile_combo, 1)
-        self._profiles_btn = QPushButton("🎭")
-        self._profiles_btn.setProperty("role", "ghost")
-        self._profiles_btn.setFixedSize(32, 32)
-        self._profiles_btn.setToolTip("Manage character profiles")
-        self._profiles_btn.clicked.connect(self._on_profiles_clicked)
-        profile_select_row.addWidget(self._profiles_btn)
-        profile_box.addWidget(profile_lbl)
-        profile_box.addLayout(profile_select_row)
-        profile_widget = QWidget()
-        profile_widget.setLayout(profile_box)
-        profile_widget.setMaximumWidth(260)
-        row1.addWidget(profile_widget)
-
+        # Voice readout
         voice_box = QVBoxLayout()
         voice_box.setSpacing(2)
         voice_lbl = QLabel("VOICE")
@@ -394,11 +414,12 @@ class KokoroStudioMain(QMainWindow):
         voice_box.addWidget(self._voice_readout)
         voice_widget = QWidget()
         voice_widget.setLayout(voice_box)
-        voice_widget.setMinimumWidth(180)
+        voice_widget.setMinimumWidth(200)
         row1.addWidget(voice_widget)
 
+        # Speed
         speed_box = QVBoxLayout()
-        speed_box.setSpacing(4)
+        speed_box.setSpacing(2)
         speed_lbl = QLabel("SPEED")
         speed_lbl.setObjectName("SectionTitle")
         speed_row = QHBoxLayout()
@@ -408,8 +429,8 @@ class KokoroStudioMain(QMainWindow):
         self._speed_spin.setSingleStep(0.05)
         self._speed_spin.setRange(SPEED_MIN, SPEED_MAX)
         self._speed_spin.setValue(1.0)
-        self._speed_spin.setMinimumWidth(82)
-        self._speed_spin.setSuffix("x")
+        self._speed_spin.setMinimumWidth(70)
+        self._speed_spin.setSuffix("×")
         speed_row.addWidget(self._speed_spin)
         self._speed_slider = QSlider(Qt.Horizontal)
         self._speed_slider.setRange(int(SPEED_MIN * self._SPEED_TICK), int(SPEED_MAX * self._SPEED_TICK))
@@ -417,41 +438,97 @@ class KokoroStudioMain(QMainWindow):
         speed_row.addWidget(self._speed_slider, 1)
         speed_box.addWidget(speed_lbl)
         speed_box.addLayout(speed_row)
-        row1.addLayout(speed_box, 1)
+        row1.addLayout(speed_box, 2)
 
-        out_box = QVBoxLayout()
-        out_box.setSpacing(4)
-        out_lbl = QLabel("OUTPUT FILE")
-        out_lbl.setObjectName("SectionTitle")
-        out_row = QHBoxLayout()
-        out_row.setSpacing(6)
+        # Format
+        format_box = QVBoxLayout()
+        format_box.setSpacing(2)
+        format_lbl = QLabel("FORMAT")
+        format_lbl.setObjectName("SectionTitle")
         self._format_combo = QComboBox()
         self._format_combo.addItems([f.upper() for f in OUTPUT_FORMATS])
-        self._format_combo.setMinimumWidth(86)
+        self._format_combo.setMinimumWidth(80)
+        self._format_combo.setMaximumWidth(100)
         mono_font = QFont("Consolas")
         mono_font.setStyleHint(QFont.Monospace)
         self._format_combo.setFont(mono_font)
-        out_row.addWidget(self._format_combo)
-        self._output_edit = QLineEdit()
-        self._output_edit.setPlaceholderText("Path to save the generated audio…")
-        out_row.addWidget(self._output_edit, 1)
-        self._browse_btn = QPushButton("Browse…")
-        self._browse_btn.setProperty("role", "ghost")
-        out_row.addWidget(self._browse_btn)
-        out_box.addWidget(out_lbl)
-        out_box.addLayout(out_row)
-        row1.addLayout(out_box, 1)
+        format_box.addWidget(format_lbl)
+        format_box.addWidget(self._format_combo)
+        row1.addLayout(format_box)
+
+        # Profile
+        profile_box = QVBoxLayout()
+        profile_box.setSpacing(2)
+        profile_lbl = QLabel("PROFILE")
+        profile_lbl.setObjectName("SectionTitle")
+        profile_select_row = QHBoxLayout()
+        profile_select_row.setSpacing(4)
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(130)
+        self._profile_combo.setToolTip("Select a character profile")
+        profile_select_row.addWidget(self._profile_combo, 1)
+        self._profiles_btn = QPushButton("🎭")
+        self._profiles_btn.setProperty("role", "ghost")
+        self._profiles_btn.setFixedSize(30, 30)
+        self._profiles_btn.setToolTip("Manage profiles")
+        self._profiles_btn.clicked.connect(self._on_profiles_clicked)
+        profile_select_row.addWidget(self._profiles_btn)
+        profile_box.addWidget(profile_lbl)
+        profile_box.addLayout(profile_select_row)
+        row1.addLayout(profile_box)
 
         layout.addLayout(row1)
 
-        # Dialogue chip
+        # ── Row 2: Toggles · Counters ─────────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+
+        self._pron_checkbox = QCheckBox("📖 Pronunciation")
+        self._pron_checkbox.setChecked(True)
+        row2.addWidget(self._pron_checkbox)
+
+        self._pron_count_label = QLabel("0 rules")
+        self._pron_count_label.setObjectName("Counter")
+        row2.addWidget(self._pron_count_label)
+
+        separator_vline = QFrame()
+        separator_vline.setFrameShape(QFrame.VLine)
+        separator_vline.setStyleSheet("color: #2C303E;")
+        row2.addWidget(separator_vline)
+
+        self._ssml_checkbox = QCheckBox("⚡ SSML")
+        self._ssml_checkbox.setChecked(False)
+        row2.addWidget(self._ssml_checkbox)
+
+        separator_vline2 = QFrame()
+        separator_vline2.setFrameShape(QFrame.VLine)
+        separator_vline2.setStyleSheet("color: #2C303E;")
+        row2.addWidget(separator_vline2)
+
+        self._stream_checkbox = QCheckBox("▶ Stream")
+        self._stream_checkbox.setChecked(self._stream_available)
+        self._stream_checkbox.setEnabled(self._stream_available)
+        row2.addWidget(self._stream_checkbox)
+
+        row2.addStretch(1)
+
+        self._project_indicator = QLabel("")
+        self._project_indicator.setStyleSheet(
+            "color: #636882; font-size: 10px; font-weight: 600;"
+            " letter-spacing: 1px; padding: 0 4px;"
+        )
+        row2.addWidget(self._project_indicator)
+
+        layout.addLayout(row2)
+
+        # ── Dialogue & SSML chips ─────────────────────────────────
         chip_row_inner = QHBoxLayout()
         chip_row_inner.setSpacing(8)
         self._dialogue_chip = QLabel("")
         self._dialogue_chip.setStyleSheet(
             "color: #9178FF; background-color: rgba(123,97,255,0.10);"
             " border: 1px solid rgba(123,97,255,0.35);"
-            " border-radius: 6px; padding: 5px 10px;"
+            " border-radius: 6px; padding: 4px 10px;"
             " font-size: 11px; font-weight: 600;"
         )
         chip_row_inner.addWidget(self._dialogue_chip, 1)
@@ -460,14 +537,13 @@ class KokoroStudioMain(QMainWindow):
         self._dialogue_chip_row.setVisible(False)
         layout.addWidget(self._dialogue_chip_row)
 
-        # SSML chip
         ssml_chip_row_inner = QHBoxLayout()
         ssml_chip_row_inner.setSpacing(8)
         self._ssml_chip = QLabel("")
         self._ssml_chip.setStyleSheet(
             "color: #10B981; background-color: rgba(16,185,129,0.10);"
             " border: 1px solid rgba(16,185,129,0.35);"
-            " border-radius: 6px; padding: 5px 10px;"
+            " border-radius: 6px; padding: 4px 10px;"
             " font-size: 11px; font-weight: 600;"
         )
         ssml_chip_row_inner.addWidget(self._ssml_chip, 1)
@@ -476,63 +552,62 @@ class KokoroStudioMain(QMainWindow):
         self._ssml_chip_row.setVisible(False)
         layout.addWidget(self._ssml_chip_row)
 
-        # Row 2: action buttons
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
+        # ── Output path ───────────────────────────────────────────
+        out_row = QHBoxLayout()
+        out_row.setSpacing(6)
+        out_lbl = QLabel("OUTPUT")
+        out_lbl.setObjectName("SectionTitle")
+        out_lbl.setFixedWidth(50)
+        out_row.addWidget(out_lbl)
+        self._output_edit = QLineEdit()
+        self._output_edit.setPlaceholderText("Output path…")
+        out_row.addWidget(self._output_edit, 1)
+        self._browse_btn = QPushButton("Browse")
+        self._browse_btn.setProperty("role", "ghost")
+        self._browse_btn.setFixedWidth(70)
+        out_row.addWidget(self._browse_btn)
 
-        self._pron_checkbox = QCheckBox("Apply rules")
-        self._pron_checkbox.setChecked(True)
-        row2.addWidget(self._pron_checkbox)
+        self._open_folder_btn = QPushButton("📁")
+        self._open_folder_btn.setProperty("role", "ghost")
+        self._open_folder_btn.setFixedSize(28, 28)
+        self._open_folder_btn.setToolTip("Open output folder in file explorer")
+        out_row.addWidget(self._open_folder_btn)
+        layout.addLayout(out_row)
 
-        self._pron_count_label = QLabel("0 rules")
-        self._pron_count_label.setObjectName("Counter")
-        row2.addSpacing(12)
-        row2.addWidget(self._pron_count_label)
+        # ── Row 3: Action bar ─────────────────────────────────────
+        action_bar = QFrame()
+        action_bar.setObjectName("ActionBar")
+        action_layout = QHBoxLayout(action_bar)
+        action_layout.setContentsMargins(10, 8, 10, 8)
+        action_layout.setSpacing(8)
 
-        self._ssml_checkbox = QCheckBox("Apply SSML")
-        self._ssml_checkbox.setChecked(False)
-        row2.addSpacing(12)
-        row2.addWidget(self._ssml_checkbox)
-
-        self._stream_checkbox = QCheckBox("▶ Stream")
-        self._stream_checkbox.setChecked(self._stream_available)
-        self._stream_checkbox.setEnabled(self._stream_available)
-        row2.addSpacing(8)
-        row2.addWidget(self._stream_checkbox)
-
-        self._play_btn = QPushButton("▶  Play last")
+        self._play_btn = QPushButton("▶ Play")
         self._play_btn.setProperty("role", "ghost")
         self._play_btn.setEnabled(False)
-        row2.addWidget(self._play_btn)
+        action_layout.addWidget(self._play_btn)
 
-        self._stop_audio_btn = QPushButton("■  Stop audio")
+        self._stop_audio_btn = QPushButton("■ Stop")
         self._stop_audio_btn.setProperty("role", "ghost")
         self._stop_audio_btn.setEnabled(False)
-        row2.addWidget(self._stop_audio_btn)
+        action_layout.addWidget(self._stop_audio_btn)
 
-        self._project_indicator = QLabel("")
-        self._project_indicator.setStyleSheet(
-            "color: #9DA0A8; font-size: 10px; font-weight: 600;"
-            " letter-spacing: 1px; padding: 0 4px;"
-        )
-        row2.addWidget(self._project_indicator)
+        action_sep1 = QFrame()
+        action_sep1.setFrameShape(QFrame.VLine)
+        action_sep1.setStyleSheet("color: #2C303E;")
+        action_layout.addWidget(action_sep1)
 
-        row2.addStretch(1)
-
-        self._open_folder_btn = QPushButton("📂  Open output folder")
-        self._open_folder_btn.setProperty("role", "ghost")
-        row2.addWidget(self._open_folder_btn)
-
-        self._stop_btn = QPushButton("■  Stop generation")
+        self._stop_btn = QPushButton("■ Stop")
         self._stop_btn.setProperty("role", "danger")
         self._stop_btn.setVisible(False)
-        row2.addWidget(self._stop_btn)
+        action_layout.addWidget(self._stop_btn)
 
-        self._generate_btn = QPushButton("▶  Generate")
+        action_layout.addStretch(1)
+
+        self._generate_btn = QPushButton("Generate")
         self._generate_btn.setProperty("role", "primary")
-        row2.addWidget(self._generate_btn)
+        action_layout.addWidget(self._generate_btn)
 
-        layout.addLayout(row2)
+        layout.addWidget(action_bar)
 
         return panel
 
@@ -540,14 +615,15 @@ class KokoroStudioMain(QMainWindow):
         sb = QStatusBar(self)
         sb.setSizeGripEnabled(False)
         self._status_label = QLabel("Ready.")
-        self._status_label.setStyleSheet("font-weight: 600;")
+        self._status_label.setStyleSheet("font-weight: 500; font-size: 12px;")
         sb.addWidget(self._status_label, 1)
         self._progress = QProgressBar()
-        self._progress.setRange(0, 0)
-        self._progress.setMaximumWidth(240)
-        self._progress.setFixedHeight(14)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setFixedWidth(120)
+        self._progress.setFixedHeight(6)
         self._progress.setVisible(False)
-        self._progress.setObjectName("Indeterminate")
+        self._progress.setTextVisible(False)
         sb.addPermanentWidget(self._progress)
         return sb
 
@@ -834,12 +910,36 @@ class KokoroStudioMain(QMainWindow):
             QMessageBox.critical(self, "Save failed", f"{type(e).__name__}: {e}")
 
     # --------------------------------------------------------- Voice list
-    def _repopulate_voice_list(self, lang_code: Optional[str]) -> None:
+    def _on_voice_search(self, text: str) -> None:
+        """Filter the voice list based on search text."""
+        self._repopulate_voice_list(None, search_filter=text)
+
+    def _repopulate_voice_list(self, lang_code: Optional[str], search_filter: Optional[str] = None) -> None:
         voices = list_voices(lang=lang_code)
         self._voice_list.blockSignals(True)
         self._voice_list.clear()
-        if not voices:
-            if lang_code in {"j", "z"}:
+
+        # Apply search filter
+        filter_text = (search_filter or "").strip().lower()
+        if filter_text:
+            voices = [
+                v for v in voices
+                if filter_text in v.lower()
+            ]
+        # Also filter blends
+        filtered_blends = {}
+        if filter_text:
+            for bname in self._loaded_blends:
+                if filter_text in bname.lower():
+                    filtered_blends[bname] = self._loaded_blends[bname]
+            blend_keys = filtered_blends
+        else:
+            blend_keys = self._loaded_blends
+
+        if not voices and not blend_keys:
+            if filter_text:
+                msg = f"No voices matching \"{filter_text}\""
+            elif lang_code in {"j", "z"}:
                 msg = (
                     "No voices bundled for Japanese / Mandarin.\n\n"
                     "Install misaki[ja] or misaki[zh] (plus the matching "
@@ -857,6 +957,7 @@ class KokoroStudioMain(QMainWindow):
             placeholder = QListWidgetItem(msg)
             placeholder.setFlags(Qt.NoItemFlags)
             self._voice_list.addItem(placeholder)
+
         for voice_name in voices:
             info = get_voice_info(voice_name)
             item = QListWidgetItem()
@@ -879,7 +980,7 @@ class KokoroStudioMain(QMainWindow):
             label.setContentsMargins(0, 0, 0, 0)
             row_width = max(self._voice_list.viewport().width() - 24, 220)
             label.setMinimumWidth(row_width)
-            item.setSizeHint(QSize(row_width, label.sizeHint().height() + 8))
+            item.setSizeHint(QSize(row_width, label.sizeHint().height() + 6))
             label.setToolTip(
                 f"<b>{voice_name}</b><br>"
                 f"Language: {info['lang_label']} ({info['lang']})<br>"
@@ -889,7 +990,7 @@ class KokoroStudioMain(QMainWindow):
             self._voice_list.addItem(item)
             self._voice_list.setItemWidget(item, label)
 
-        for blend_name, blend in self._loaded_blends.items():
+        for blend_name, blend in blend_keys.items():
             item = QListWidgetItem()
             item.setData(Qt.UserRole, blend_name)
             item.setData(Qt.UserRole + 1, True)
@@ -917,9 +1018,13 @@ class KokoroStudioMain(QMainWindow):
             label.setContentsMargins(0, 0, 0, 0)
             row_width = max(self._voice_list.viewport().width() - 24, 220)
             label.setMinimumWidth(row_width)
-            item.setSizeHint(QSize(row_width, label.sizeHint().height() + 8))
+            item.setSizeHint(QSize(row_width, label.sizeHint().height() + 6))
             self._voice_list.addItem(item)
             self._voice_list.setItemWidget(item, label)
+
+        # Update voice count badge
+        total_count = len(voices) + len(blend_keys)
+        self._voice_count_label.setText(str(total_count))
 
         keep_idx = -1
         for i in range(self._voice_list.count()):
@@ -931,10 +1036,12 @@ class KokoroStudioMain(QMainWindow):
             self._voice_list.setCurrentRow(keep_idx)
         elif self._voice_list.count() > 0:
             self._voice_list.setCurrentRow(0)
-            new_voice = self._voice_list.currentItem().data(Qt.UserRole)
-            if new_voice != self._current_voice:
-                self._current_voice = new_voice
-                voice_changed = True
+            cur_item = self._voice_list.currentItem()
+            if cur_item:
+                new_voice = cur_item.data(Qt.UserRole)
+                if new_voice and new_voice != self._current_voice:
+                    self._current_voice = new_voice
+                    voice_changed = True
         else:
             self._current_voice = ""
             voice_changed = True
