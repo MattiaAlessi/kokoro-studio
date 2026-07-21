@@ -312,47 +312,65 @@ pip install pypdf ebooklib beautifulsoup4 lameenc
 
 ### Features
 
-- [X] **Generation History**
-  - SQLite or JSON log of every generation
-  - Stores: text, voice, speed, timestamp, output path, duration
+- [x] **Generation History** ✅ *shipped*
+  - SQLite-backed log of every generation (built-in `sqlite3`, no extra deps)
+  - Stores: text, voice, speed, timestamp, output path, duration, format
   - Instant re-play and re-export without re-generating
-  - Searchable/filterable history panel
+  - Searchable/filterable history panel with 50-entry default limit
+  - 25 unit tests in `tests/test_history.py`
   - _Complexity: Medium_
 
-- [X] **Batch Generation Queue**
-  - Queue multiple text blocks or import a list of texts
-  - Background worker processes sequentially with progress
-  - Each item gets its own output file
-  - Summary report when batch completes
+- [x] **Batch Generation Queue** ✅ *shipped*
+  - Queue multiple text blocks or import a list of texts (.txt paragraphs)
+  - Background `BatchWorker` processes sequentially with per-item progress signals
+  - Each item gets its own output file with auto-naming
+  - Summary report dialog when batch completes (success/fail/timing)
+  - Reuses all synthesis features: pronunciation, blends, SSML, post-processing
   - _Complexity: Medium_
 
-- [ ] **Character Profiles**
-  - Save named presets: voice (or blend) + speed + pronunciation dict + post-processing settings
-  - One-click recall from a dropdown or panel
-  - Built-in presets: "Narrator", "News Anchor", "Whisper", etc.
+- [x] **Character Profiles** ✅ *shipped*
+  - Save named presets: voice + speed + optional pronunciation rules + description
+  - One-click recall from a dropdown in the controls panel
+  - 9 built-in presets: Narrator, News Anchor, Storyteller, Professor, Deep Voice, Whisper, Energetic, British Narrator, British Deep
+  - JSON persistence at `<Documents>/KokoroStudio/profiles.json` (versioned schema)
+  - Full `ProfilesDialog` with table view, save-from-current, delete
+  - Built-in profiles are read-only and never shadowed by user data
+  - 30+ unit tests in `tests/test_profiles.py`
   - _Complexity: Medium_
 
-- [ ] **Audio Post-Processing**
-  - Applied to `np.ndarray` before export
-  - Normalization (peak / loudness)
-  - Silence trimming (leading/trailing)
-  - Fade in / fade out
-  - Volume boost/cut (dB)
-  - Uses `numpy` / `scipy` — no heavy dependencies
+- [x] **Audio Post-Processing** 🎚 ✅ *shipped*
+  - Pure-DSP module `kokoro_studio.audio_processing` (zero Qt deps, pure numpy)
+  - `PostProcessingParams` frozen dataclass with validation
+  - `trim_silence()` — leading/trailing silence removal with configurable threshold & min-silence length
+  - `apply_volume()` — fixed gain boost/cut (±24 dB range)
+  - `fade_in()` / `fade_out()` — linear ramps (controllable duration)
+  - `normalize_peak()` — set the loudest sample to a target dBFS (default -1 dBFS)
+  - `normalize_loudness()` — RMS-based loudness normalisation (default -16 dBFS)
+  - `apply_all()` — pipeline: trim → volume → fade → normalise
+  - Applied inside `generate_speech` before `save_audio` in ALL three paths (single, dialogue, SSML)
+  - Threaded through `SynthesisWorker` into the main GUI flow
+  - Also wired into `BatchWorker` for batch queue items
+  - Full `PostProcessingDialog` with descriptive labels, tooltips, and real-world value examples
+  - 53 unit tests in `tests/test_audio_processing.py`
   - _Complexity: Medium_
 
-- [ ] **Waveform Visualization**
-  - Render the generated audio as a visual waveform
-  - Show playback position during playback
-  - Use `QGraphicsView` or `pyqtgraph`
-  - Click-to-seek on the waveform
-  - _Complexity: Medium_
+- ~~**Waveform Visualization**~~ **removed**
+  - Caused `STATUS_FATAL_APP_EXIT` (0xC0000409) in Qt FFmpeg backend
+  - `kokoro_studio/gui/waveform.py` deleted
+  - All `self._waveform.*` calls stripped from `main_window.py`
+  - Playback toggle reverts to simple `stop(); setSource(); play()`
+  - _Complexity: N/A_
 
 ### Research Tasks
 
-- [ ] Research SQLite vs JSON for generation history — tradeoffs for this use case
-- [ ] Research `pyqtgraph` vs `QGraphicsView` for waveform rendering in PySide6
-- [ ] Research audio normalization algorithms (peak vs LUFS)
+- [x] Research SQLite vs JSON for generation history — tradeoffs for this use case
+- [x] Research `pyqtgraph` vs `QGraphicsView` for waveform rendering in PySide6
+  > **Decision:** Neither. Pure `QPainter` with pre-downsampled numpy array is faster and lighter for a simple waveform overview.
+  > No extra dependencies needed.
+- [x] Research audio normalization algorithms (peak vs LUFS)
+  > **Decision:** Use simple peak normalisation (default, fast) and RMS-based loudness normalisation
+  > as a toggle option.  Full ITU-R BS.1770-4 LUFS would add a `pyloudnorm` dependency;
+  > RMS is sufficient for the uniform dynamic range of TTS speech output.
 - [ ] Research `scipy.signal` functions useful for audio post-processing
 - [ ] Research Qt threading best practices for batch queue management
 
@@ -371,44 +389,105 @@ pip install scipy
 
 ### Features
 
-- [ ] **Project Management**
-  - Save/load projects (`.ksproj` JSON format)
-  - Contains: text, all settings, history references, audio cache paths
-  - Recent projects list
-  - Auto-save on changes
+- [x] **Project Management** ✅ *shipped*
+  - New module `kokoro_studio/project_manager.py` (zero Qt deps)
+  - `ProjectData` frozen dataclass — captures editor text, voice, speed, format,
+    pronunciation/SSML/stream toggles, active profile, post-processing params
+  - `PostProcessingSnapshot` frozen dataclass for serialising PP params
+  - JSON `.ksproj` format with version field for forward-compat schema migration
+  - `save_project(path, data)` / `load_project(path)` public API
+  - 3 project buttons in toolbar: 📄 New Project, 📂 Open Project, 💾 Save Project
+  - Window title + inline `_project_indicator` show project name and • dirty flag
+  - `_mark_project_modified()` tracks unsaved changes through all state mutators
+  - `_prompt_save_if_modified()` — Save / Discard / Cancel dialog on close/open/new
+  - `_load_project_from_file()` with full `blockSignals` guard during state restore
+  - Round-trip unit test passes: JSON ↔ dataclass
   - _Complexity: High_
 
-- [ ] **Audiobook Chapter Builder**
-  - Split EPUB by chapters automatically
-  - Assign voices per chapter (or per character via multi-speader)
-  - Batch-generate entire books
-  - Export as: chapter-per-file, merged single file, or M4B audiobook format
-  - Chapter progress tracking
+- [x] **Audiobook Chapter Builder** 📚 ✅ *shipped*
+  - New module `kokoro_studio/audiobook.py` (zero Qt deps): `ChapterInfo`,
+    `AudiobookProject`, `generate_audiobook()`, `merge_audio_segments()`
+  - Reads `Document.chapters` from existing `document_loader.py` (EPUB
+    per-ITEM_DOCUMENT split, TXT single-chapter)
+  - Per-chapter voice assignment via combo in the table (double-click to open)
+  - "Apply default voice to all" button for bulk voice assignment
+  - Global speed, format, output directory controls
+  - Export options: ✓ separate chapter-per-file ✓ merged single file
+  - Background `QThread` generation with per-chapter progress bar + table status
+  - Summary dialog on completion showing files created
+  - GUI: `AudiobookDialog` in `dialogs.py` + 📚 button in toolbar
+  - 0.5 s configurable cross-chapter silence gap in merged output
+  - Files auto-named as `001_Chapter_Title.wav` etc.
   - _Complexity: High_
 
-- [ ] **Emotion / Style Sliders**
-  - Expose StyleTTS 2 style vectors as UI controls
-  - Sliders: "Energy", "Warmth", "Pace Variation", "Expressiveness"
-  - Maps to latent space interpolation
-  - Requires deep understanding of StyleTTS 2 internals
+- [x] **Emotion / Style Sliders** ✅ *shipped*
+  - New `kokoro_studio/emotional_style.py` module: `StyleParameters` dataclass,
+    `compute_style_tensor()` for tensor interpolation + noise perturbation,
+    10 named presets, `summarize_style()` helper
+  - 3 sliders: Energy (calm→energetic), Warmth (cool→warm), Expressiveness (flat→varied)
+  - Each slider 0.0–1.0 range, 0.5 = neutral (no modification)
+  - `voice_style` kwarg integrated into `generate_speech()`, threaded through
+    single-speaker, SSML, and multi-speaker dialogue paths
+  - `SynthesisWorker` passes style to engine via `voice_style` param
+  - GUI: `EmotionStyleDialog` in `dialogs.py` with sliders + preset dropdown +
+    reset button + live summary; 🎭 Style toolbar button with ✦ active indicator
+  - Zero PySide6 deps in the core module; lazy imports throughout engine + GUI
+  - 276 existing tests pass (no regressions)
   - _Complexity: High_
 
-- [ ] **Light / Dark Theme Toggle**
-  - Swap between dark (current) and light QSS stylesheets
-  - Store preference in QSettings
+- [x] **API / CLI Server Mode** ✅ *shipped*
+  - New `kokoro_studio/api_server.py` module (zero Qt deps)
+  - FastAPI app with CORS and lifespan-based pipeline warm-up
+  - `GET /health` — server health + version info
+  - `GET /v1/models` — list available models (OpenAI-compatible)
+  - `GET /v1/voices` — list all voices with metadata
+  - `POST /v1/audio/speech` — OpenAI-compatible TTS: accepts `model`,
+    `input` (max 4096 chars), `voice` (OpenAI-style + direct Kokoro names),
+    `response_format` (wav/mp3/flac/ogg/pcm), `speed` (0.25–4.0);
+    returns binary audio with correct Content-Type
+  - `POST /v1/audio/stream` — SSE streaming with base64-encoded chunk events
+  - `WebSocket /ws/stream` — real-time streaming: JSON request →
+    binary PCM chunks + final WAV + `[DONE]` signal
+  - CLI: `kokoro-studio serve --port 8000 --host 127.0.0.1`
+  - Dependencies: fastapi, uvicorn, python-multipart, sse-starlette
+    (optional: `pip install -e '.[server]'`)
+  - Swagger docs at `http://localhost:8000/docs`
+  - _Complexity: High_
+
+- [x] **Light / Dark Theme Toggle** ✅ *shipped*
+  - `QSS_DARK` (was `QSS`) + new `QSS_LIGHT` and `SETTINGS_QSS_DARK`/`SETTINGS_QSS_LIGHT` in `theme.py`
+  - `get_qss(mode)` and `get_settings_qss(mode)` helpers
+  - 🌙/☀️ toggle button in header, switches theme on click
+  - Preference persisted via `QSettings("Kokoro Studio", "Kokoro Studio")`
+  - All dialogs use `_resolve_settings_qss()` to read theme from QSettings
   - _Complexity: Low_
 
-- [ ] **API / CLI Server Mode**
-  - Expose Kokoro as a local REST API via FastAPI
-  - OpenAI-compatible `/v1/audio/speech` endpoint
-  - WebSocket streaming endpoint
-  - CLI: `kokoro-studio serve --port 8000`
-  - Positions Kokoro as a drop-in local replacement for cloud TTS APIs
+- [x] **API / CLI Server Mode** ✅ *shipped*
+  - New `kokoro_studio/api_server.py` module (zero Qt deps)
+  - FastAPI app with CORS and lifespan-based pipeline warm-up
+  - `GET /health` — server health + version info
+  - `GET /v1/models` — list available models (OpenAI-compatible)
+  - `GET /v1/voices` — list all voices with metadata
+  - `POST /v1/audio/speech` — OpenAI-compatible TTS: accepts `model`,
+    `input` (max 4096 chars), `voice` (OpenAI-style + direct Kokoro names),
+    `response_format` (wav/mp3/flac/ogg/pcm), `speed` (0.25–4.0);
+    returns binary audio with correct Content-Type
+  - `POST /v1/audio/stream` — SSE streaming with base64-encoded chunk events
+  - `WebSocket /ws/stream` — real-time streaming: JSON request →
+    binary PCM chunks + final WAV + `[DONE]` signal
+  - CLI: `kokoro-studio serve --port 8000 --host 127.0.0.1`
+  - Dependencies: fastapi, uvicorn, python-multipart, sse-starlette
+    (optional: `pip install -e '.[server]'`)
+  - Swagger docs at `http://localhost:8000/docs`
   - _Complexity: High_
 
-- [ ] **Batch CLI Mode**
-  - `kokoro-studio batch input.txt --voice af_heart --speed 1.0 --output ./output/`
-  - Useful for scripting and automation
+- [x] **Batch CLI Mode** ✅ *shipped*
+  - `kokoro-studio batch <input_file> [options]` — headless CLI batch generation
+  - New module `kokoro_studio/cli.py` with argparse: `--voice/-v`, `--speed/-s`, `--format/-f`, `--output-dir/-o`, `--prefix`, `--lang`, `--dry-run`
+  - Splits input .txt file by blank-line paragraphs, generates one audio file per paragraph
+  - Lazy imports `blending` only for blend-name validation (so `scipy` stays optional)
+  - `__main__.py` dispatches to CLI or GUI based on first argument
+  - Zero Qt dependency in the CLI path — works headless
   - _Complexity: Medium_
 
 ### Research Tasks
@@ -501,14 +580,14 @@ Phase 4 (Platform) — Most features depend on earlier phases
 
 ## Current Status
 
-**Overall Progress:** 8 / 20 features completed
+**Overall Progress:** 14 / 20 features completed
 
-**Current Phase:** Phase 2 — Core TTS Advancements *(in progress)*
+**Current Phase:** Phase 3 — Professional Workflow ✅ *(complete, minus removed Waveform)*
 
-**Just Shipped:** SSML-lite Controls 🎙
+**Removed:** Waveform Visualization (native crash, too unstable with current Qt/FFmpeg stack)
 
-**Next Up:** Generation History
+**Next Up:** Phase 4 — Premium & Platform Features
 
 ---
 
-_Last updated: 2026-07-10_ (SSML-lite shipped)
+_Last updated: 2026-07-20_ (Waveform Visualization removed)

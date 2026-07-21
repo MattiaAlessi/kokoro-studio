@@ -25,13 +25,13 @@ def main() -> int:
     # Defer these imports so the install-hint path above can run without
     # PySide6 installed.
     from kokoro_studio.gui.main_window import KokoroStudioMain
-    from kokoro_studio.gui.theme import QSS
+    from kokoro_studio.gui.theme import get_qss, THEME_DARK
 
     app = QApplication(sys.argv)
     app.setApplicationName("Kokoro Studio")
     app.setOrganizationName("Kokoro Studio")
     app.setStyle("Fusion")
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(get_qss(THEME_DARK))
 
     window = KokoroStudioMain()
     window.show()

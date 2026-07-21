@@ -37,6 +37,7 @@ import soundfile as sf
 if TYPE_CHECKING:
     # Only for type-checkers: at runtime `kokoro` stays lazy (see _get_pipeline).
     from kokoro import KPipeline
+    from kokoro_studio.emotional_style import StyleParameters
 
 
 # Force UTF-8 on stdout/stderr even on Windows (legacy cp1252 terminals) so that
@@ -482,6 +483,8 @@ def generate_speech(
     voice_blend: Union["VoiceBlend", Tuple[str, str, float], None] = None,
     blends: Optional[Mapping[str, "VoiceBlend"]] = None,
     apply_ssml: bool = False,
+    post_process_params: Optional["PostProcessingParams"] = None,
+    voice_style: Optional["StyleParameters"] = None,
 ) -> np.ndarray:
     """Synthesize `text` with Kokoro and return the audio (float32) at 24 kHz.
 
@@ -710,6 +713,20 @@ def generate_speech(
               f"{len(pronunciation_rules)} rule(s))",
               file=sys.stderr)
 
+    # ---- Emotion / Style post-processing (Phase 4) ----------------
+    if voice_style is not None and not _resolved_via_blend:
+        from kokoro_studio.emotional_style import compute_style_tensor
+        pv = _get_pipeline_voices(lang_code)
+        if isinstance(resolved_voice, str):
+            _prime_voice_into_pipeline(lang_code, resolved_voice)
+        resolved_voice = compute_style_tensor(
+            voice, voice_style, pv, blends=(_loaded_blends or None),
+        )
+        print(f"[Kokoro] Style applied: energy={voice_style.energy}, "
+              f"warmth={voice_style.warmth}, "
+              f"expressiveness={voice_style.expressiveness}",
+              file=sys.stderr)
+
     # ---- Multi-speaker dispatch -----------------------------------
     # Each segment calls Kokoro separately (Kokoro bakes voice style into
     # the forward pass so voice swaps aren't possible mid-call). The
@@ -741,6 +758,8 @@ def generate_speech(
             pronunciation_rules=pronunciation_rules,
             speaker_gap_s=speaker_gap_s,
             blends=blends if blends is not None else (_loaded_blends or None),
+            post_process_params=post_process_params,
+            voice_style=voice_style,
         )
 
     pipeline = _get_pipeline(lang_code)
@@ -783,6 +802,7 @@ def generate_speech(
                 on_chunk=on_chunk,
                 stop_check=stop_check,
                 pronunciation_rules=pronunciation_rules,
+                post_process_params=post_process_params,
             )
 
     pipe_kwargs: Dict[str, object] = {"voice": resolved_voice, "speed": speed}
@@ -806,6 +826,17 @@ def generate_speech(
 
     full_audio = np.concatenate(chunks)
     elapsed = time.time() - start
+
+    # ---- Audio Post-Processing (Phase 3) ---------------------------
+    if post_process_params is not None:
+        from kokoro_studio.audio_processing import apply_all
+        processed = apply_all(full_audio, post_process_params, sample_rate=SAMPLE_RATE)
+        if len(processed) > 0:
+            print(f"[Kokoro] Post-processing applied  "
+                  f"({len(full_audio)} -> {len(processed)} samples, "
+                  f"{len(full_audio)/SAMPLE_RATE:.2f}s -> {len(processed)/SAMPLE_RATE:.2f}s)",
+                  file=sys.stderr)
+            full_audio = processed
 
     if output_path:
         # Resolve effective format for logging (keep record of what we
@@ -834,6 +865,8 @@ def _generate_dialogue_segments(
     pronunciation_rules: Optional[Dict[str, str]],
     speaker_gap_s: float,
     blends: Optional[Mapping[str, "VoiceBlend"]] = None,
+    post_process_params: Optional["PostProcessingParams"] = None,
+    voice_style: Optional["StyleParameters"] = None,
 ) -> np.ndarray:
     """Per-segment synthesis path used when `multi_speaker=True`.
 
@@ -924,6 +957,16 @@ def _generate_dialogue_segments(
             seg.voice, effective_blends or {}, seg_pipeline_voices,
         )
 
+        # Apply voice style per-segment (Phase 4)
+        if voice_style is not None:
+            from kokoro_studio.emotional_style import compute_style_tensor
+            if isinstance(seg_resolved, str):
+                _prime_voice_into_pipeline(seg_lang, seg_resolved)
+            seg_resolved = compute_style_tensor(
+                seg.voice, voice_style, seg_pipeline_voices,
+                blends=effective_blends,
+            )
+
         print(
             f"[Kokoro] Dialogue segment {seg_idx + 1}/{len(segments)}"
             f": voice={seg.voice}{' (blend)' if seg_is_blend else ''}, "
@@ -980,6 +1023,16 @@ def _generate_dialogue_segments(
     full_audio = np.concatenate(all_audio)
     elapsed = time.time() - start
 
+    # ---- Audio Post-Processing (Phase 3) ---------------------------
+    if post_process_params is not None:
+        from kokoro_studio.audio_processing import apply_all
+        processed = apply_all(full_audio, post_process_params, sample_rate=SAMPLE_RATE)
+        if len(processed) > 0:
+            print(f"[Kokoro] Post-processing applied (dialogue)  "
+                  f"({len(full_audio)} -> {len(processed)} samples)",
+                  file=sys.stderr)
+            full_audio = processed
+
     if output_path:
         effective_format = (
             output_format.lower()
@@ -1013,6 +1066,7 @@ def _generate_ssml_segments(
     on_chunk: "Callable[[int, int, np.ndarray], None]",
     stop_check: "Callable[[], bool]",
     pronunciation_rules: Optional[Dict[str, str]],
+    post_process_params: Optional["PostProcessingParams"] = None,
 ) -> np.ndarray:
     """Per-segment synthesis path used when ``apply_ssml=True``.
 
@@ -1161,6 +1215,16 @@ def _generate_ssml_segments(
 
     full_audio = np.concatenate(all_audio)
     elapsed = time.time() - start
+
+    # ---- Audio Post-Processing (Phase 3) ---------------------------
+    if post_process_params is not None:
+        from kokoro_studio.audio_processing import apply_all
+        processed = apply_all(full_audio, post_process_params, sample_rate=SAMPLE_RATE)
+        if len(processed) > 0:
+            print(f"[Kokoro] Post-processing applied (SSML)  "
+                  f"({len(full_audio)} -> {len(processed)} samples)",
+                  file=sys.stderr)
+            full_audio = processed
 
     if output_path:
         effective_format = (

@@ -12,3 +12,7 @@ pypdf>=4.0
 ebooklib>=0.18
 beautifulsoup4>=4.12
 lxml>=4.9
+fastapi>=0.100
+uvicorn>=0.27
+python-multipart>=0.0.6
+sse-starlette>=1.6

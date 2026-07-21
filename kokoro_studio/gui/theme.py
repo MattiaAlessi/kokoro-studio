@@ -17,10 +17,23 @@ except ImportError:
 
 
 # ===========================================================================
-# Theme: dark UI inspired by modern TTS products
+# Theme constants
 # ===========================================================================
 
-QSS = """
+THEME_DARK = "dark"
+THEME_LIGHT = "light"
+
+_THEME_NAMES = {THEME_DARK: "Dark", THEME_LIGHT: "Light"}
+
+def theme_display_name(mode: str) -> str:
+    return _THEME_NAMES.get(mode, "Dark")
+
+
+# ===========================================================================
+# Dark theme QSS
+# ===========================================================================
+
+QSS_DARK = """
 * { font-family: 'Segoe UI', 'Inter', system-ui, sans-serif; }
 
 QMainWindow, QWidget {
@@ -197,10 +210,190 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 
 
 # ===========================================================================
-# Settings / Info dialog QSS
+# Light theme QSS
 # ===========================================================================
 
-SETTINGS_QSS = """
+QSS_LIGHT = """
+* { font-family: 'Segoe UI', 'Inter', system-ui, sans-serif; }
+
+QMainWindow, QWidget {
+    background-color: #F2F2F7;
+    color: #1C1C1E;
+}
+
+QFrame#Panel {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D1D6;
+    border-radius: 12px;
+}
+
+QLabel#H1 {
+    color: #000000;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+}
+QLabel#Subtitle {
+    color: #8E8E93;
+    font-size: 11px;
+}
+QLabel#SectionTitle {
+    color: #8E8E93;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+}
+QLabel#Counter {
+    color: #8E8E93;
+    font-size: 11px;
+}
+QLabel#VoiceReadout {
+    color: #1C1C1E;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#Badge {
+    color: #FFFFFF;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 1.2px;
+    padding: 4px 10px;
+    border-radius: 6px;
+}
+
+QPlainTextEdit {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 10px;
+    padding: 14px;
+    selection-background-color: #7B61FF;
+    selection-color: white;
+    font-family: 'Consolas', 'Cascadia Code', 'JetBrains Mono', monospace;
+    font-size: 12px;
+}
+QPlainTextEdit:focus { border: 1px solid #7B61FF; }
+
+QListWidget {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 10px;
+    padding: 6px;
+    outline: 0;
+}
+QListWidget::item {
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 3px 1px;
+}
+QListWidget::item:hover { background-color: #F2F2F7; }
+QListWidget::item:selected { background-color: #7B61FF; color: #FFFFFF; }
+QListWidget::item QLabel { background-color: transparent; color: #1C1C1E; }
+QListWidget::item:selected QLabel { color: #FFFFFF; }
+
+QPushButton {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-weight: 500;
+}
+QPushButton:hover { background-color: #F2F2F7; border-color: #C7C7CC; }
+QPushButton:pressed { background-color: #E5E5EA; }
+QPushButton:disabled { color: #C7C7CC; border-color: #E5E5EA; background-color: #F2F2F7; }
+
+QPushButton[role="primary"] {
+    background-color: #7B61FF;
+    color: white;
+    border: 1px solid #7B61FF;
+    font-weight: 600;
+    padding: 9px 22px;
+}
+QPushButton[role="primary"]:hover  { background-color: #9178FF; border-color: #9178FF; }
+QPushButton[role="primary"]:pressed{ background-color: #6B4FE5; }
+QPushButton[role="primary"]:disabled {
+    background-color: #C4B8FF; border-color: #C4B8FF; color: #888;
+}
+
+QPushButton[role="danger"] {
+    background-color: #FF3B30; color: white; border: 1px solid #FF3B30;
+}
+QPushButton[role="danger"]:hover { background-color: #FF6259; border-color: #FF6259; }
+QPushButton[role="danger"]:disabled {
+    background-color: #FFB3B0; border-color: #FFB3B0; color: #888;
+}
+
+QPushButton[role="ghost"] { background-color: transparent; border: 1px solid #D1D1D6; }
+QPushButton[role="ghost"]:hover { background-color: #F2F2F7; }
+QPushButton[role="ghost"]:disabled { background-color: transparent; border-color: #E5E5EA; }
+
+QDoubleSpinBox, QComboBox, QLineEdit {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 8px;
+    padding: 7px 12px;
+    selection-background-color: #7B61FF;
+}
+QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #7B61FF; }
+QComboBox::drop-down { border: none; width: 24px; }
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF; color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    selection-background-color: #7B61FF;
+    padding: 4px; outline: 0;
+}
+
+QProgressBar {
+    background-color: #E5E5EA;
+    border: 1px solid #D1D1D6;
+    border-radius: 6px;
+    text-align: center;
+    color: #1C1C1E;
+    height: 14px;
+}
+QProgressBar::chunk {
+    background-color: #7B61FF;
+    border-radius: 5px;
+}
+QProgressBar#Indeterminate { text-align: right; padding-right: 8px; color: #8E8E93; }
+
+QStatusBar {
+    background-color: #FFFFFF;
+    color: #8E8E93;
+    border-top: 1px solid #D1D1D6;
+}
+QStatusBar QLabel { color: #1C1C1E; padding: 0 6px; }
+
+QSplitter::handle { background-color: transparent; }
+
+QToolTip {
+    background-color: #FFFFFF; color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+
+QScrollBar:vertical {
+    background: transparent; width: 8px; margin: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #C7C7CC; border-radius: 4px; min-height: 30px;
+}
+QScrollBar::handle:vertical:hover { background: #AEAEB2; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0; background: none;
+}
+"""
+
+
+# ===========================================================================
+# Dialog QSS — dark
+# ===========================================================================
+
+SETTINGS_QSS_DARK = """
 QDialog {
     background-color: #0F1115;
 }
@@ -281,6 +474,108 @@ QLineEdit#AddressReadOnly {
 
 
 # ===========================================================================
+# Dialog QSS — light
+# ===========================================================================
+
+SETTINGS_QSS_LIGHT = """
+QDialog {
+    background-color: #F2F2F7;
+}
+
+QTabWidget::pane {
+    border: 1px solid #D1D1D6;
+    background-color: #FFFFFF;
+    border-radius: 0px;
+    top: 0px;
+}
+QTabBar {
+    background-color: transparent;
+    qproperty-drawBase: 0;
+}
+QTabBar::tab {
+    background-color: transparent;
+    color: #8E8E93;
+    padding: 9px 18px;
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+    margin-right: 2px;
+    font-weight: 500;
+}
+QTabBar::tab:selected {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border-bottom: 2px solid #7B61FF;
+}
+QTabBar::tab:hover:!selected {
+    color: #1C1C1E;
+}
+
+QLabel#SettingsH1 {
+    color: #000000;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+}
+QLabel#SettingsBlock {
+    color: #1C1C1E;
+    font-size: 12px;
+    line-height: 1.6;
+}
+QLabel#AddrLabel {
+    color: #8E8E93;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+}
+
+QTableWidget {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 8px;
+    gridline-color: #E5E5EA;
+}
+QHeaderView::section {
+    background-color: #F2F2F7;
+    color: #8E8E93;
+    border: none;
+    border-bottom: 1px solid #D1D1D6;
+    padding: 6px 10px;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 1.2px;
+}
+
+QLineEdit#AddressReadOnly {
+    background-color: #FFFFFF;
+    color: #1C1C1E;
+    border: 1px solid #D1D1D6;
+    border-radius: 8px;
+    padding: 8px 12px;
+    selection-background-color: #7B61FF;
+}
+"""
+
+
+# ===========================================================================
+# Convenience: pick the right QSS by theme mode
+# ===========================================================================
+
+def get_qss(mode: str) -> str:
+    """Return the main application QSS for *mode* (dark or light)."""
+    if mode == THEME_LIGHT:
+        return QSS_LIGHT
+    return QSS_DARK
+
+
+def get_settings_qss(mode: str) -> str:
+    """Return the settings-dialog QSS for *mode* (dark or light)."""
+    if mode == THEME_LIGHT:
+        return SETTINGS_QSS_LIGHT
+    return SETTINGS_QSS_DARK
+
+
+# ===========================================================================
 # Helpers
 # ===========================================================================
 
@@ -323,7 +618,7 @@ def default_output_dir() -> Path:
 
 def default_output_path(voice: str, fmt: str = "wav") -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_voice = voice.replace("/", "_").replace("\\", "_")
+    safe_voice = voice.replace("/", "_").replace("\\\\", "_")
     if fmt not in OUTPUT_FORMATS:
         fmt = "wav"
     return str(default_output_dir() / f"Kokoro_{safe_voice}_{ts}.{fmt}")

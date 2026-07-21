@@ -58,6 +58,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.100",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.6",
+    "sse-starlette>=1.6",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

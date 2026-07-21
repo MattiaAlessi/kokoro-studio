@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional
 
+from kokoro_studio.audio_processing import PostProcessingParams
 from kokoro_studio.blending import VoiceBlend
 from kokoro_studio.engine import SAMPLE_RATE, generate_speech
 
@@ -168,6 +169,7 @@ class BatchWorker(QThread):
         speaker_gap_s: float = 0.25,
         blends: Optional[Mapping[str, VoiceBlend]] = None,
         apply_ssml: bool = False,
+        post_process_params: Optional[PostProcessingParams] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         if not _HAS_PYSIDE6:
@@ -183,6 +185,7 @@ class BatchWorker(QThread):
         self._speaker_gap_s = speaker_gap_s
         self._blends: Optional[dict] = dict(blends) if blends else None
         self._apply_ssml = bool(apply_ssml)
+        self._post_process_params = post_process_params
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -214,6 +217,7 @@ class BatchWorker(QThread):
                         speaker_gap_s=self._speaker_gap_s,
                         blends=self._blends,
                         apply_ssml=self._apply_ssml,
+                        post_process_params=self._post_process_params,
                         on_chunk=None,
                         stop_check=self._stop_check,
                     )

@@ -12,7 +12,8 @@ from typing import Optional
 
 import numpy as np
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QUrl
+from PySide6.QtGui import QShortcut
 from PySide6.QtGui import QAction, QFont, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -31,19 +32,27 @@ from kokoro_studio.history import GenerationHistory
 from kokoro_studio.streaming import (
     PcmRingBuffer, default_audio_output_is_available,
 )
+from kokoro_studio.audio_processing import (
+    PostProcessingParams, default_processing_params,
+)
 from kokoro_studio.gui.dialogs import (
-    BatchQueueDialog, BlendVoiceDialog, DialogueHelpDialog, HistoryDialog,
-    ProfilesDialog, PronunciationDialog, SettingsDialog, SSMLHelpDialog,
+    AudiobookDialog, BatchQueueDialog, BlendVoiceDialog, DialogueHelpDialog,
+    EmotionStyleDialog, HistoryDialog, PostProcessingDialog, ProfilesDialog,
+    PronunciationDialog, SettingsDialog, SSMLHelpDialog,
 )
 from kokoro_studio.gui.editor import DocumentDropEditor
 from kokoro_studio.gui.theme import (
-    QSS, default_output_dir, default_output_path, format_bytes, format_duration,
+    get_qss, get_settings_qss, THEME_DARK, THEME_LIGHT, theme_display_name,
+    default_output_dir, default_output_path, format_bytes, format_duration,
     preview_phrase_for_lang,
 )
 from kokoro_studio.profiles import (
     CharacterProfile, load_profiles, save_profiles,
 )
 from kokoro_studio.gui.workers import SynthesisWorker
+from kokoro_studio.project_manager import (
+    ProjectData, PostProcessingSnapshot, save_project, load_project,
+)
 
 # Lazy import sounddevice for streaming playback
 try:
@@ -109,7 +118,26 @@ class KokoroStudioMain(QMainWindow):
         self._history = GenerationHistory(str(default_output_dir() / "history.db"))
         self._current_segments: list = []
 
+        # Audio post-processing state
+        self._post_process_params: PostProcessingParams = default_processing_params()
+
+        # Emotion / Style state (Phase 4)
+        from kokoro_studio.emotional_style import default_style_params
+        self._style_params = default_style_params()
+        self._style_params_active = False
+
+        # Theme state (dark / light)
+        self._settings_store = QSettings("Kokoro Studio", "Kokoro Studio")
+        self._theme_mode: str = self._settings_store.value("theme", THEME_DARK, type=str)
+        if self._theme_mode not in (THEME_DARK, THEME_LIGHT):
+            self._theme_mode = THEME_DARK
+
+        # Project management state
+        self._current_project_path: Optional[Path] = None
+        self._project_modified: bool = False
+
         self._build_ui()
+        self._apply_theme()
         self._wire_signals()
         self._wire_shortcuts()
 
@@ -120,6 +148,7 @@ class KokoroStudioMain(QMainWindow):
         self._refresh_profiles_combo()
         self._refresh_output_path()
         self._update_button_states()
+        self._update_title()
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -182,6 +211,13 @@ class KokoroStudioMain(QMainWindow):
             badges.addWidget(lbl)
         h.addLayout(badges)
 
+        self._theme_btn = QPushButton("☀️")
+        self._theme_btn.setProperty("role", "ghost")
+        self._theme_btn.setToolTip("Switch to Light theme")
+        self._theme_btn.setFixedSize(34, 34)
+        self._theme_btn.setStyleSheet("font-size: 18px; padding: 0; border-radius: 17px;")
+        h.addWidget(self._theme_btn)
+
         self._settings_btn = QPushButton("⚙")
         self._settings_btn.setProperty("role", "ghost")
         self._settings_btn.setToolTip("Settings & info")
@@ -208,16 +244,30 @@ class KokoroStudioMain(QMainWindow):
         self._history_btn = make_btn("🕒 History", self._on_history_clicked)
         self._blend_btn = make_btn("🎛 Blending", self._on_blending_clicked)
         self._pron_btn = make_btn("📖 Dictionary", self._on_pronunciation_clicked)
+        self._post_process_btn = make_btn("🎚 Post-Process", self._on_post_process_clicked)
+        self._style_btn = make_btn("🎭 Style", self._on_style_clicked)
+        self._audiobook_btn = make_btn("📚 Audiobook", self._on_audiobook_clicked)
         self._ssml_help_btn = make_btn("⚡ SSML Help", self._on_ssml_help_clicked)
         self._dialogue_help_btn = make_btn("🎭 Dialogue Help", self._on_dialogue_help_clicked)
+
+        # Project buttons (right-aligned)
+        self._new_project_btn = make_btn("📄 New Project", self._on_new_project)
+        self._open_project_btn = make_btn("📂 Open Project", self._on_open_project)
+        self._save_project_btn = make_btn("💾 Save Project", self._on_save_project)
 
         layout.addWidget(self._history_btn)
         layout.addWidget(self._batch_btn)
         layout.addWidget(self._blend_btn)
         layout.addWidget(self._pron_btn)
+        layout.addWidget(self._post_process_btn)
+        layout.addWidget(self._style_btn)
+        layout.addWidget(self._audiobook_btn)
         layout.addWidget(self._ssml_help_btn)
         layout.addWidget(self._dialogue_help_btn)
         layout.addStretch(1)
+        layout.addWidget(self._new_project_btn)
+        layout.addWidget(self._open_project_btn)
+        layout.addWidget(self._save_project_btn)
         return bar
 
     def _build_voice_panel(self) -> QWidget:
@@ -460,6 +510,13 @@ class KokoroStudioMain(QMainWindow):
         self._stop_audio_btn.setEnabled(False)
         row2.addWidget(self._stop_audio_btn)
 
+        self._project_indicator = QLabel("")
+        self._project_indicator.setStyleSheet(
+            "color: #9DA0A8; font-size: 10px; font-weight: 600;"
+            " letter-spacing: 1px; padding: 0 4px;"
+        )
+        row2.addWidget(self._project_indicator)
+
         row2.addStretch(1)
 
         self._open_folder_btn = QPushButton("📂  Open output folder")
@@ -534,9 +591,14 @@ class KokoroStudioMain(QMainWindow):
         self._stop_audio_btn.clicked.connect(self._on_stop_audio_clicked)
         self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
 
+        self._theme_btn.clicked.connect(self._toggle_theme)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
 
         self._player.playbackStateChanged.connect(self._on_playback_state)
+
+        # Project signals are wired in _wire_project_signals
+        self._wire_project_signals()
+
 
     def _wire_shortcuts(self) -> None:
         self._gen_act = QAction("Generate", self)
@@ -562,6 +624,24 @@ class KokoroStudioMain(QMainWindow):
         self._save_act.setShortcutContext(Qt.WindowShortcut)
         self._save_act.triggered.connect(self._on_save_text_clicked)
         self.addAction(self._save_act)
+
+        self._new_project_act = QAction("New Project", self)
+        self._new_project_act.setShortcut("Ctrl+Shift+N")
+        self._new_project_act.setShortcutContext(Qt.WindowShortcut)
+        self._new_project_act.triggered.connect(self._on_new_project)
+        self.addAction(self._new_project_act)
+
+        self._open_project_act = QAction("Open Project…", self)
+        self._open_project_act.setShortcut("Ctrl+Shift+O")
+        self._open_project_act.setShortcutContext(Qt.WindowShortcut)
+        self._open_project_act.triggered.connect(self._on_open_project)
+        self.addAction(self._open_project_act)
+
+        self._save_project_act = QAction("Save Project", self)
+        self._save_project_act.setShortcut("Ctrl+Shift+S")
+        self._save_project_act.setShortcutContext(Qt.WindowShortcut)
+        self._save_project_act.triggered.connect(self._on_save_project)
+        self.addAction(self._save_project_act)
 
         self._editor.installEventFilter(self)
 
@@ -593,6 +673,7 @@ class KokoroStudioMain(QMainWindow):
                 self._pron_rules if self._pron_checkbox.isChecked() else None
             ),
             blends=dict(self._loaded_blends) if self._loaded_blends else None,
+            post_process_params=self._post_process_params,
             parent=self,
         )
         dlg.exec()
@@ -618,6 +699,79 @@ class KokoroStudioMain(QMainWindow):
         dlg.rules_saved.connect(self._on_pron_rules_saved)
         dlg.exec()
 
+    def _on_post_process_clicked(self) -> None:
+        dlg = PostProcessingDialog(self._post_process_params, self)
+        dlg.params_changed.connect(self._on_post_process_params_changed)
+        dlg.exec()
+
+    def _on_style_clicked(self) -> None:
+        dlg = EmotionStyleDialog(self._style_params, self)
+        dlg.style_changed.connect(self._on_style_changed)
+        dlg.exec()
+
+    def _on_audiobook_clicked(self) -> None:
+        dlg = AudiobookDialog(
+            current_voice=self._current_voice or DEFAULT_VOICE,
+            current_speed=self._speed_spin.value(),
+            current_format=self._current_output_format(),
+            pronunciation_rules=(
+                self._pron_rules if self._pron_checkbox.isChecked() else None
+            ),
+            blends=dict(self._loaded_blends) if self._loaded_blends else None,
+            post_process_params=self._post_process_params,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_post_process_params_changed(self, params: PostProcessingParams) -> None:
+        self._post_process_params = params
+        self._mark_project_modified()
+
+    def _on_style_changed(self, params) -> None:
+        """Called when EmotionStyleDialog emits style_changed."""
+        self._style_params = params
+        was_active = self._style_params_active
+        is_neutral = (
+            abs(params.energy - 0.5) < 0.02
+            and abs(params.warmth - 0.5) < 0.02
+            and abs(params.expressiveness - 0.5) < 0.02
+        )
+        self._style_params_active = not is_neutral
+        if not was_active and self._style_params_active:
+            # Just activated
+            self._style_btn.setText("🎭 Style ✦")
+            self._style_btn.setStyleSheet(
+                "QPushButton { color: #7B61FF; font-weight: 600; }"
+            )
+            from kokoro_studio.emotional_style import summarize_style
+            self._status_label.setText(
+                f"🎭 Style: {summarize_style(params)}"
+            )
+        elif was_active and not self._style_params_active:
+            # Just deactivated
+            self._style_btn.setText("🎭 Style")
+            self._style_btn.setStyleSheet("")
+            self._status_label.setText("Style: Off (neutral)")
+        elif self._style_params_active:
+            from kokoro_studio.emotional_style import summarize_style
+            self._status_label.setText(
+                f"🎭 Style: {summarize_style(params)}"
+            )
+        self._mark_project_modified()
+        # Build a summary of active processing
+        parts = []
+        if params.trim_silence:
+            parts.append("✂️ Trim")
+        if params.volume_enabled:
+            parts.append(f"📈 {params.volume_gain_db:+.1f} dB")
+        if params.fade_enabled:
+            parts.append("🌀 Fade")
+        if params.normalize_enabled:
+            mode = "Peak" if params.normalize_mode == "peak" else "Loudness"
+            parts.append(f"⚡ {mode}")
+        summary = "  ·  ".join(parts) if parts else "Off"
+        self._status_label.setText(f"Post-processing: {summary}")
+
     def _on_ssml_help_clicked(self) -> None:
         dlg = SSMLHelpDialog(self)
         dlg.insert_requested.connect(self._insert_ssml_sample)
@@ -636,10 +790,12 @@ class KokoroStudioMain(QMainWindow):
                 self._voice_list.setCurrentRow(i)
                 break
         self._status_label.setText(f"Saved blend {name!r}")
+        self._mark_project_modified()
 
     def _on_pron_rules_saved(self, rules: dict) -> None:
         self._pron_rules = rules
         self._refresh_pron_count_label()
+        self._mark_project_modified()
 
     def _insert_ssml_sample(self, text: str) -> None:
         self._editor.setPlainText(text)
@@ -653,6 +809,7 @@ class KokoroStudioMain(QMainWindow):
         self._counter_label.setText(f"{chars:,} chars  ·  {words:,} words")
         self._update_button_states()
         self._refresh_dialogue_chip(text)
+        self._mark_project_modified()
 
     def _on_save_text_clicked(self) -> None:
         text = self._editor.toPlainText()
@@ -798,6 +955,7 @@ class KokoroStudioMain(QMainWindow):
         self._refresh_voice_readout()
         self._refresh_output_path()
         self._update_button_states()
+        self._mark_project_modified()
 
     def _refresh_voice_readout(self) -> None:
         if not self._current_voice:
@@ -1041,6 +1199,7 @@ class KokoroStudioMain(QMainWindow):
             self._speed_slider.blockSignals(True)
             self._speed_slider.setValue(slider_value)
             self._speed_slider.blockSignals(False)
+        self._mark_project_modified()
 
     def _on_speed_slider_changed(self, value: int) -> None:
         new_speed = value / self._SPEED_TICK
@@ -1048,6 +1207,7 @@ class KokoroStudioMain(QMainWindow):
             self._speed_spin.blockSignals(True)
             self._speed_spin.setValue(new_speed)
             self._speed_spin.blockSignals(False)
+        # _mark_project_modified is called by _on_speed_spin_changed
 
     def _refresh_output_path(self) -> None:
         path = self._default_path_for_current()
@@ -1086,6 +1246,7 @@ class KokoroStudioMain(QMainWindow):
             self._output_edit.blockSignals(True)
             self._output_edit.setText(new_path)
             self._output_edit.blockSignals(False)
+        self._mark_project_modified()
 
     def _on_browse_clicked(self) -> None:
         start_dir = str(default_output_dir())
@@ -1233,6 +1394,8 @@ class KokoroStudioMain(QMainWindow):
             speaker_gap_s=speaker_gap_s,
             blends=blends,
             apply_ssml=self._ssml_checkbox.isChecked(),
+            post_process_params=self._post_process_params,
+            voice_style=self._style_params if self._style_params_active else None,
         )
         self._worker.progress.connect(self._on_synthesis_progress)
         self._worker.chunk_ready.connect(self._on_streaming_chunk)
@@ -1254,7 +1417,7 @@ class KokoroStudioMain(QMainWindow):
             f"{format_duration(cumulative_seconds)} of audio so far{eta_str}"
         )
 
-    def _on_synthesis_done(self, path: str, duration_s: float, auto_play: bool, _audio: np.ndarray) -> None:
+    def _on_synthesis_done(self, path: str, duration_s: float, auto_play: bool, audio: np.ndarray) -> None:
         self._last_audio_path = path
         try:
             text = getattr(self, "_last_generation_text", "")
@@ -1299,6 +1462,7 @@ class KokoroStudioMain(QMainWindow):
         self._stop_streaming_sink()
         QMessageBox.critical(self, "Synthesis failed", error_msg)
 
+
     def _on_synthesis_thread_finished(self) -> None:
         self._worker = None
         self._progress.setRange(0, 0)
@@ -1336,6 +1500,7 @@ class KokoroStudioMain(QMainWindow):
         elif state == QMediaPlayer.PlaybackState.PausedState:
             self._player.play()
         else:
+            # Stopped: restart from the beginning
             self._player.stop()
             self._player.setSource(QUrl.fromLocalFile(self._last_audio_path))
             self._player.play()
@@ -1343,14 +1508,44 @@ class KokoroStudioMain(QMainWindow):
     def _on_stop_audio_clicked(self) -> None:
         self._player.stop()
 
+    # --------------------------------------------------------- Theme
+    def _apply_theme(self) -> None:
+        """Apply the current _theme_mode QSS to the main window."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(get_qss(self._theme_mode))
+        self._update_theme_button_icon()
+
+    def _update_theme_button_icon(self) -> None:
+        """Update the theme toggle button icon and tooltip."""
+        is_dark = self._theme_mode == THEME_DARK
+        self._theme_btn.setText("🌙" if is_dark else "☀️")
+        target = THEME_LIGHT if is_dark else THEME_DARK
+        self._theme_btn.setToolTip(f"Switch to {theme_display_name(target)} theme")
+
+    def _toggle_theme(self) -> None:
+        """Toggle between dark and light theme."""
+        self._theme_mode = THEME_LIGHT if self._theme_mode == THEME_DARK else THEME_DARK
+        self._apply_theme()
+        self._status_label.setText(
+            f"Theme: {theme_display_name(self._theme_mode)}"
+        )
+
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
         playing = state == QMediaPlayer.PlayingState
+        stopped = state == QMediaPlayer.StoppedState
         self._stop_audio_btn.setEnabled(playing)
         self._play_btn.setEnabled(
             not playing
             and self._last_audio_path is not None
             and Path(self._last_audio_path).exists()
         )
+        # If the player is now playing, streaming is fully done — clean up
+        if playing:
+            if not bool(getattr(self._sd_stream, "active", False)):
+                self._stop_streaming_sink()
+
+
 
     def _on_open_folder_clicked(self) -> None:
         folder = default_output_dir()
@@ -1433,6 +1628,7 @@ class KokoroStudioMain(QMainWindow):
             self._sd_stream = None
         if self._ring_buffer is not None:
             self._ring_buffer.reset()
+            self._ring_buffer = None
 
     def _on_stream_toggle(self, checked: bool) -> None:
         if not self._stream_available:
@@ -1441,6 +1637,7 @@ class KokoroStudioMain(QMainWindow):
         state = "ON" if checked else "OFF"
         mode = "real-time streaming" if checked else "play-after-synthesis"
         self._status_label.setText(f"Streaming playback: {state}  ·  next run will use {mode}")
+        self._mark_project_modified()
 
     # --------------------------------------------------------- Blending
     def _load_blends(self) -> None:
@@ -1454,9 +1651,9 @@ class KokoroStudioMain(QMainWindow):
     def _set_feature_controls_enabled(self, enabled: bool) -> None:
         for btn in (
             self._history_btn, self._batch_btn, self._profiles_btn,
-            self._blend_btn, self._pron_btn,
+            self._blend_btn, self._pron_btn, self._post_process_btn,
             self._ssml_help_btn, self._dialogue_help_btn, self._settings_btn,
-            self._open_doc_btn,
+            self._audiobook_btn, self._style_btn, self._open_doc_btn,
         ):
             btn.setEnabled(enabled)
         self._voice_list.setEnabled(enabled)
@@ -1481,7 +1678,272 @@ class KokoroStudioMain(QMainWindow):
             self._save_act.setEnabled(text_ok and not running)
 
     # --------------------------------------------------------- Window close
+    # --------------------------------------------------------- Project Management
+    def _wire_project_signals(self) -> None:
+        self._new_project_btn.clicked.connect(self._on_new_project)
+        self._open_project_btn.clicked.connect(self._on_open_project)
+        self._save_project_btn.clicked.connect(self._on_save_project)
+
+    def _update_title(self) -> None:
+        """Update the window title to show the project name and modified state."""
+        if self._current_project_path:
+            name = self._current_project_path.stem
+        else:
+            name = "Untitled"
+        modified = ' •' if self._project_modified else ''
+        self.setWindowTitle(f"{name}{modified} · Kokoro Studio")
+        self._project_indicator.setText(f"📄 {name}{modified}")
+
+    def _mark_project_modified(self) -> None:
+        """Mark the current project as having unsaved changes."""
+        if not self._project_modified:
+            self._project_modified = True
+            self._update_title()
+
+    def _prompt_save_if_modified(self) -> bool:
+        """If the project has unsaved changes, ask the user what to do.
+
+        Returns True if the caller should proceed (or the user saved),
+        False if the user cancelled.
+        """
+        if not self._project_modified:
+            return True
+        ans = QMessageBox.question(
+            self, "Unsaved changes",
+            "The current project has unsaved changes. Save before continuing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if ans == QMessageBox.Save:
+            self._on_save_project()
+            return not self._project_modified  # False if save was cancelled
+        if ans == QMessageBox.Discard:
+            return True
+        return False  # Cancel
+
+    def _on_new_project(self) -> None:
+        """Create a new empty project."""
+        if not self._prompt_save_if_modified():
+            return
+        self._current_project_path = None
+        self._editor.setPlainText("")
+        self._current_voice = DEFAULT_VOICE
+        self._speed_spin.setValue(1.0)
+        self._format_combo.setCurrentIndex(0)
+        self._ssml_checkbox.setChecked(False)
+        self._stream_checkbox.setChecked(self._stream_available)
+        self._pron_checkbox.setChecked(True)
+        self._post_process_params = default_processing_params()
+        self._current_profile_name = None
+        self._profile_combo.setCurrentIndex(0)
+        self._repopulate_voice_list(None)
+        self._refresh_output_path()
+        self._refresh_profiles_combo()
+        self._project_modified = False
+        self._update_title()
+        self._status_label.setText("New project created.")
+
+    def _on_open_project(self) -> None:
+        """Open a .ksproj project file."""
+        if not self._prompt_save_if_modified():
+            return
+        start_dir = str(default_output_dir())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", start_dir,
+            "Kokoro Studio Project (*.ksproj);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._load_project_from_file(path)
+
+    def _load_project_from_file(self, path: str) -> None:
+        """Load a .ksproj file and apply its state to the GUI.
+
+        Uses ``blockSignals`` extensively so that restoring values doesn't
+        trigger ``_mark_project_modified`` through every signal handler.
+        """
+        try:
+            data = load_project(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Load failed", f"{type(e).__name__}: {e}")
+            return
+
+        # Block signals on all interactive widgets while restoring state
+        self._editor.blockSignals(True)
+        self._speed_spin.blockSignals(True)
+        self._speed_slider.blockSignals(True)
+        self._format_combo.blockSignals(True)
+        self._ssml_checkbox.blockSignals(True)
+        self._stream_checkbox.blockSignals(True)
+        self._pron_checkbox.blockSignals(True)
+        self._voice_list.blockSignals(True)
+        self._profile_combo.blockSignals(True)
+
+        try:
+            # Apply editor text
+            self._editor.setPlainText(data.editor_text)
+
+            # Apply voice (select in list if available)
+            voice = data.voice or DEFAULT_VOICE
+            found_voice = False
+            for i in range(self._voice_list.count()):
+                if self._voice_list.item(i).data(Qt.UserRole) == voice:
+                    self._voice_list.setCurrentRow(i)
+                    found_voice = True
+                    break
+            if not found_voice:
+                voice = self._voice_list.currentItem().data(Qt.UserRole) if self._voice_list.count() > 0 else DEFAULT_VOICE
+                if voice is None:
+                    voice = DEFAULT_VOICE
+            self._current_voice = voice
+            self._refresh_voice_readout()
+
+            # Apply speed
+            speed = max(SPEED_MIN, min(SPEED_MAX, data.speed))
+            self._speed_spin.setValue(speed)
+            self._speed_slider.setValue(int(round(speed * self._SPEED_TICK)))
+
+            # Apply output format
+            fmt = data.output_format.lower()
+            for i in range(self._format_combo.count()):
+                if self._format_combo.itemText(i).lower() == fmt:
+                    self._format_combo.setCurrentIndex(i)
+                    break
+
+            # Apply toggles
+            self._pron_checkbox.setChecked(data.apply_pronunciation)
+            self._ssml_checkbox.setChecked(data.apply_ssml)
+            self._stream_checkbox.setChecked(data.stream and self._stream_available)
+
+            # Apply profile
+            if data.profile_name and data.profile_name in self._profiles:
+                for i in range(self._profile_combo.count()):
+                    if self._profile_combo.itemData(i) == data.profile_name:
+                        self._profile_combo.setCurrentIndex(i)
+                        self._current_profile_name = data.profile_name
+                        break
+            else:
+                self._profile_combo.setCurrentIndex(0)
+                self._current_profile_name = None
+
+            # Apply post-processing params
+            pp = data.post_processing
+            try:
+                self._post_process_params = PostProcessingParams(
+                    trim_silence=pp.trim_silence,
+                    trim_threshold_db=pp.trim_threshold_db,
+                    trim_min_silence_len=pp.trim_min_silence_len,
+                    volume_enabled=pp.volume_enabled,
+                    volume_gain_db=pp.volume_gain_db,
+                    fade_enabled=pp.fade_enabled,
+                    fade_in_duration_s=pp.fade_in_duration_s,
+                    fade_out_duration_s=pp.fade_out_duration_s,
+                    normalize_enabled=pp.normalize_enabled,
+                    normalize_mode=pp.normalize_mode,
+                    normalize_target_db=pp.normalize_target_db,
+                )
+            except Exception:
+                self._post_process_params = default_processing_params()
+
+            self._refresh_output_path()
+            self._current_project_path = Path(path)
+            self._project_modified = False
+
+            # Refresh UI chips
+            self._refresh_dialogue_chip(data.editor_text)
+            if data.apply_ssml:
+                self._refresh_ssml_chip(data.editor_text)
+        finally:
+            # Restore signals
+            self._editor.blockSignals(False)
+            self._speed_spin.blockSignals(False)
+            self._speed_slider.blockSignals(False)
+            self._format_combo.blockSignals(False)
+            self._ssml_checkbox.blockSignals(False)
+            self._stream_checkbox.blockSignals(False)
+            self._pron_checkbox.blockSignals(False)
+            self._voice_list.blockSignals(False)
+            self._profile_combo.blockSignals(False)
+
+        self._update_title()
+        self._update_button_states()
+        self._status_label.setText(f"Loaded project · {Path(path).stem}")
+
+    def _on_save_project(self) -> None:
+        """Save the current project.  If unsaved, prompt for a path."""
+        if self._current_project_path is None:
+            self._on_save_project_as()
+            return
+        self._save_project_to(self._current_project_path)
+
+    def _on_save_project_as(self) -> None:
+        """Prompt for a path and save the project."""
+        start_dir = str(default_output_dir())
+        default_name = "untitled.ksproj"
+        if self._current_project_path:
+            default_name = self._current_project_path.name
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project As", str(Path(start_dir) / default_name),
+            "Kokoro Studio Project (*.ksproj);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".ksproj"):
+            path += ".ksproj"
+        self._current_project_path = Path(path)
+        self._save_project_to(self._current_project_path)
+
+    def _save_project_to(self, path: Path) -> None:
+        """Serialise the current GUI state and write a .ksproj file."""
+        pp = self._post_process_params
+        snapshot = PostProcessingSnapshot(
+            trim_silence=pp.trim_silence,
+            trim_threshold_db=pp.trim_threshold_db,
+            trim_min_silence_len=pp.trim_min_silence_len,
+            volume_enabled=pp.volume_enabled,
+            volume_gain_db=pp.volume_gain_db,
+            fade_enabled=pp.fade_enabled,
+            fade_in_duration_s=pp.fade_in_duration_s,
+            fade_out_duration_s=pp.fade_out_duration_s,
+            normalize_enabled=pp.normalize_enabled,
+            normalize_mode=pp.normalize_mode,
+            normalize_target_db=pp.normalize_target_db,
+        )
+
+        data = ProjectData(
+            name=path.stem,
+            editor_text=self._editor.toPlainText(),
+            voice=self._current_voice or DEFAULT_VOICE,
+            speed=self._speed_spin.value(),
+            output_format=self._current_output_format(),
+            apply_pronunciation=self._pron_checkbox.isChecked(),
+            apply_ssml=self._ssml_checkbox.isChecked(),
+            stream=self._stream_checkbox.isChecked(),
+            profile_name=self._current_profile_name,
+            post_processing=snapshot,
+        )
+
+        try:
+            save_project(str(path), data)
+        except OSError as e:
+            QMessageBox.critical(self, "Save failed", f"{type(e).__name__}: {e}")
+            return
+
+        self._project_modified = False
+        self._current_project_path = path
+        self._update_title()
+        self._status_label.setText(f"Saved project · {path.stem}")
+
+    # --------------------------------------------------------- Window close
     def closeEvent(self, event) -> None:
+        # Save theme preference
+        self._settings_store.setValue("theme", self._theme_mode)
+
+        # Check for unsaved project changes
+        if not self._prompt_save_if_modified():
+            event.ignore()
+            return
+
         if self._worker is not None and self._worker.isRunning():
             ans = QMessageBox.question(
                 self, "Generation in progress",

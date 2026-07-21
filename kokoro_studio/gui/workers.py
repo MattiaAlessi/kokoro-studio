@@ -10,6 +10,7 @@ import numpy as np
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from kokoro_studio.audio_processing import PostProcessingParams
 from kokoro_studio.blending import VoiceBlend
 from kokoro_studio.engine import SAMPLE_RATE, generate_speech
 
@@ -55,6 +56,8 @@ class SynthesisWorker(QThread):
         blends: Optional[Mapping[str, VoiceBlend]] = None,
         parent: Optional[QObject] = None,
         apply_ssml: bool = False,
+        post_process_params: Optional[PostProcessingParams] = None,
+        voice_style=None,
     ) -> None:
         super().__init__(parent)
         self._text = text
@@ -71,6 +74,8 @@ class SynthesisWorker(QThread):
             dict(blends) if blends else None
         )
         self._apply_ssml = bool(apply_ssml)
+        self._post_process_params = post_process_params
+        self._voice_style = voice_style
         self._last_seg_idx: int = -1
         self._cumulative_chunk_count: int = 0
         self._stop_requested = False
@@ -131,6 +136,8 @@ class SynthesisWorker(QThread):
                 stop_check=self._stop_check,
                 blends=self._blends,
                 apply_ssml=self._apply_ssml,
+                post_process_params=self._post_process_params,
+                voice_style=self._voice_style,
             )
             if self._stop_requested:
                 self.failed.emit("Generation stopped by user (no file written).")

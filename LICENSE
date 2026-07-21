@@ -1,7 +1,7 @@
 Kokoro Studio Source-Available License
-Version 1.0 — 2026
+Version 2.0 — 2026
 
-Copyright (c) 2026 Matti. All rights reserved.
+Copyright (c) 2026 Mattia. All rights reserved.
 
 The Licensor (the copyright holder named above) grants you the rights
 described below on the following conditions.
@@ -28,27 +28,45 @@ You may:
 2. CONDITIONS
 ────────────────────────────────────────────────────────────────────────
 
-  a) ATTRIBUTION. Any copy, modification, or redistribution of the
-     Software, in whole or in part, must retain and prominently display:
+  a) MANDATORY CREDIT AND LINK. Any copy, modification, redistribution,
+     or derivative work based on the Software — in whole, in part, or in
+     inspiration — MUST give clear credit to the original project and
+     include an explicit link back to the upstream repository:
+
+       https://github.com/MattiaAlessi/kokoro-studio
+
+     Credit must appear in a reasonably prominent location, such as:
+       - The "About" / "Credits" / "Acknowledgements" dialog of any
+         application or service that incorporates the Software.
+       - The README or documentation of any redistributed package.
+       - The description or credits of any public release.
+
+     Examples of acceptable credit text:
+       "This project is based on Kokoro Studio (https://github.com/MattiaAlessi/kokoro-studio)"
+       "Uses Kokoro Studio (https://github.com/MattiaAlessi/kokoro-studio) as a foundation"
+       "Inspired by Kokoro Studio — https://github.com/MattiaAlessi/kokoro-studio"
+
+  b) RETENTION OF NOTICES. In addition to the credit above, any copy,
+     modification, or redistribution must retain and prominently display:
 
        - This LICENSE file (or a clearly equivalent license declaration).
-       - The copyright notice in Section 0.
+       - The copyright notice at the top of this document.
        - The donation information documented in DONATIONS.md (or in any
          notice embedded in the source).
 
-  b) MODIFICATION NOTICE. If you modify and redistribute the Software, you
+  c) MODIFICATION NOTICE. If you modify and redistribute the Software, you
      must include a clearly visible note in the documentation, README, or
      in the application's "About" / "Credits" dialog stating that you
      have modified it, together with a brief description of what was
      changed and the date of the change.
 
-  c) PRESERVATION OF DONATION INFORMATION. The donation information
+  d) PRESERVATION OF DONATION INFORMATION. The donation information
      described in DONATIONS.md must remain in the source, in the README,
      and in any user-facing "About" dialog of any redistributed build.
      You may add your own donation links alongside, but you may not
      remove or obscure the originals.
 
-  d) RESERVATION OF RIGHTS. All rights not expressly granted in this
+  e) RESERVATION OF RIGHTS. All rights not expressly granted in this
      License are reserved by the Licensor. In particular, the Licensor
      retains the exclusive right to:
 
@@ -59,7 +77,7 @@ You may:
        - Enforce this License against any violation, including by
          seeking an injunction or damages.
 
-  e) NO TRADEMARK LICENSE. This License does not grant you any right to
+  f) NO TRADEMARK LICENSE. This License does not grant you any right to
      use the Licensor's name, logos, or product names for endorsement
      or promotion of derivative works without prior written permission.
 
@@ -89,4 +107,4 @@ Licensor's sole discretion upon written request.
 
 Donations to the Licensor are appreciated and help sustain the project.
 See the DONATIONS.md file in the project root for the currently
-published donation channels (PayPal, GitHub Sponsors, etc.).
+published donation channels.

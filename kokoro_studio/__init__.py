@@ -12,6 +12,7 @@ The package is organised as follows:
   * `kokoro_studio.streaming`       real-time PCM streaming (Phase 2)
   * `kokoro_studio.blending`        voice blend presets (Phase 2 - Voice Blending)
   * `kokoro_studio.ssml`            SSML-lite markup parser (Phase 2 - SSML-lite Controls)
+  * `kokoro_studio.audio_processing` Audio post-processing (Phase 3 - Audio Post-Processing)
   * `kokoro_studio.gui`             PySide6 main window
 """
 
@@ -29,6 +30,7 @@ from kokoro_studio import (
     streaming,
     blending,
     ssml,
+    audio_processing,
     gui,
 )
 
@@ -44,5 +46,6 @@ __all__ = [
     "pronunciation",
     "streaming",    "blending",
     "ssml",
+    "audio_processing",
     "gui",
 ]  
